@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The dreamlo free leaderboard is HTTP-only; allow cleartext to that host only.
+     Everything else (word-list downloads, lookups) stays HTTPS. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">dreamlo.com</domain>
+    </domain-config>
+</network-security-config>

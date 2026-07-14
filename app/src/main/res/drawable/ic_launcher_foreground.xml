@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon foreground: a mini Wordle board (green / yellow / gray tiles). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Top row -->
+    <path android:fillColor="#538D4E"
+        android:pathData="M32,32 h18 a3,3 0 0 1 3,3 v18 a3,3 0 0 1 -3,3 h-18 a3,3 0 0 1 -3,-3 v-18 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#B59F3B"
+        android:pathData="M58,32 h18 a3,3 0 0 1 3,3 v18 a3,3 0 0 1 -3,3 h-18 a3,3 0 0 1 -3,-3 v-18 a3,3 0 0 1 3,-3 z" />
+
+    <!-- Bottom row -->
+    <path android:fillColor="#3A3A3C"
+        android:pathData="M32,58 h18 a3,3 0 0 1 3,3 v18 a3,3 0 0 1 -3,3 h-18 a3,3 0 0 1 -3,-3 v-18 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#538D4E"
+        android:pathData="M58,58 h18 a3,3 0 0 1 3,3 v18 a3,3 0 0 1 -3,3 h-18 a3,3 0 0 1 -3,-3 v-18 a3,3 0 0 1 3,-3 z" />
+</vector>
