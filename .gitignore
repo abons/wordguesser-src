@@ -16,3 +16,6 @@ local.properties
 
 # local editor/agent settings
 .claude/settings.local.json
+
+# dist/ is published as a separate public repo
+/dist/

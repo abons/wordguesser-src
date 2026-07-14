@@ -17,6 +17,16 @@ Outstanding items before publishing (e.g. Google Play). Personal sideloading alr
   - [ ] Current `targetSdk` per Play's latest requirement.
   - [ ] Store assets: icon, feature graphic, screenshots, description.
 
+## 📦 Distribution (prepared 2026-07-15 — needs your push)
+
+- [x] **Self-hosted F-Droid repo** built by hand (`dist/fdroid/repo/` — signed
+  `index-v1.jar`) + public landing page (`dist/index.html`). Fingerprint
+  `C74E…456EE`. Rebuild with `dist/fdroid/rebuild-index.sh`.
+- [x] **Local git repo** committed; secrets verified excluded.
+- [ ] **You:** install `gh` (`winget install GitHub.cli`, `gh auth login`), then follow
+  `dist/PUBLISH.md` — push the private source repo, push `dist/` as a **public** repo, and
+  enable GitHub Pages. That gives the public download link + working F-Droid repo URL.
+
 ## 🟠 Recommended (quality / robustness)
 
 - [ ] **Word-list hosting** — lists are fetched from third-party GitHub raw URLs
