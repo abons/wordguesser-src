@@ -4,6 +4,19 @@ A tiny, **native** Android word-guessing game (Wordle-style) written in **pure K
 using only the Android framework — no AppCompat, no Compose, no Material, no third-party
 libraries. The whole UI is built in code, so the APK stays small.
 
+## 📥 Download
+
+**[abons.github.io/wordguesser](https://abons.github.io/wordguesser/)** — direct APK or add
+the self-hosted F-Droid repo for automatic updates:
+
+```
+https://abons.github.io/wordguesser/fdroid/repo?fingerprint=C74E4BC48DBE3CCF800A859BC5A9118B23A19BA38C8B33573DBA1BDEB7E456EE
+```
+
+The public download page + F-Droid repo live in the separate **`dist/`** folder (published as
+its own public repo). See [dist/PUBLISH.md](dist/PUBLISH.md) for how it's hosted and how to
+ship an update.
+
 ## How to play
 
 - Guess the hidden **5-letter word** in 6 tries.
