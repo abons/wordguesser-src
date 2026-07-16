@@ -30,9 +30,11 @@ Outstanding items before publishing (e.g. Google Play). Personal sideloading alr
 
 ## 🟠 Recommended (quality / robustness)
 
-- [ ] **Word-list hosting** — lists are fetched from third-party GitHub raw URLs
-  (dwyl, OpenTaal, lorenbrichter, enz, wooorm). These can rate-limit, move or disappear.
-  For a real product, mirror/host them yourself (and re-check licenses when doing so).
+- [~] **Word-list hosting** — **NL done**: self-hosted a pre-filtered mirror of OpenTaal at
+  `https://abons.github.io/wordguesser/wordlists/nl.txt` (built by `dist/wordlists/build-nl.sh`,
+  attribution/modifications in `dist/wordlists/NL-README.md`). The other lists (dwyl,
+  lorenbrichter, enz, wooorm) are still fetched from third-party GitHub raw URLs — mirror those
+  too if desired (re-check GPL/LGPL/CC-BY per language). Cache bumped `_v5`→`_v6`.
 
 ## 🟢 Optional / nice-to-have
 

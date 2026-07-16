@@ -1371,9 +1371,9 @@ class MainActivity : Activity() {
         return words.ifEmpty { null }
     }
 
-    // _v5: bumped when proper nouns/acronyms were excluded + NL switched to approved base words.
+    // _v6: bumped when NL moved to the self-hosted (pre-filtered) mirror; forces a re-download.
     private fun cacheFile(lang: WordLists.Language): File =
-        File(filesDir, "words_${lang.code}_v5.txt")
+        File(filesDir, "words_${lang.code}_v6.txt")
 
     private fun prefs(): SharedPreferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 

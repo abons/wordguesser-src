@@ -75,8 +75,10 @@ object WordLists {
         ),
         Language(
             "nl", "NL", "Nederlands (OpenTaal)",
-            // Approved base words only — far fewer abbreviations / obscure inflections.
-            "https://raw.githubusercontent.com/OpenTaal/opentaal-wordlist/master/elements/basiswoorden-gekeurd.txt",
+            // Self-hosted, pre-filtered mirror of OpenTaal's approved base words (see
+            // dist/wordlists/ — attribution + modifications in NL-README.md). Downloading
+            // our own ~150 KB list avoids the 2.5 MB upstream file and third-party downtime.
+            "https://abons.github.io/wordguesser/wordlists/nl.txt",
             minLen = 4, maxLen = 8,
             source = "OpenTaal (approved base words)", license = "CC BY 3.0 / BSD",
             homepage = "https://github.com/OpenTaal/opentaal-wordlist",
