@@ -37,7 +37,16 @@ object WordLists {
         val source: String = "",     // attribution: where the list comes from
         val license: String = "",    // attribution: the list's license (name)
         val homepage: String = "",   // attribution: link to the source
-        val licenseUrl: String = ""  // attribution: link to the full license text
+        val licenseUrl: String = "", // attribution: link to the full license text
+        // Optional self-hosted JSON map { word: definition } in the SAME language. When set,
+        // the "?" button shows the definition directly (offline after first fetch) instead of
+        // routing through Gemini. Definitions are CC BY-SA (Wiktionary) — see defsCredit.
+        val defsUrl: String = "",
+        val defsCredit: String = "",  // e.g. "Dutch Wiktionary (CC BY-SA 3.0)"
+        // Optional broader "accept" list: extra valid words (e.g. conjugations) that are
+        // recognised as real words ("?" + strict mode) but are NOT used as target answers.
+        // `url` stays the (nicer) answer pool; this only widens what counts as a real word.
+        val acceptUrl: String = ""
     )
 
     private const val WOO_TREE = "https://github.com/wooorm/dictionaries/tree/main/dictionaries"
@@ -82,7 +91,10 @@ object WordLists {
             minLen = 4, maxLen = 8,
             source = "OpenTaal (approved base words)", license = "CC BY 3.0 / BSD",
             homepage = "https://github.com/OpenTaal/opentaal-wordlist",
-            licenseUrl = "https://creativecommons.org/licenses/by/3.0/"
+            licenseUrl = "https://creativecommons.org/licenses/by/3.0/",
+            defsUrl = "https://abons.github.io/wordguesser/wordlists/nl-defs.json",
+            defsCredit = "Dutch Wiktionary via kaikki.org (CC BY-SA 3.0)",
+            acceptUrl = "https://abons.github.io/wordguesser/wordlists/nl-accept.txt"
         ),
         Language(
             "fr", "FR", "Français",

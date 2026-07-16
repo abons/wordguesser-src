@@ -24,8 +24,11 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.io.File
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 import kotlin.random.Random
+import org.json.JSONObject
 
 /**
  * A self-contained Wordle-style word guessing game.
@@ -104,6 +107,10 @@ class MainActivity : Activity() {
     private var answers: List<String> = emptyList()          // original spellings, current length
     private var answersTyped: Set<String> = emptySet()       // folded forms, for matching
     private var typedToOriginal: Map<String, String> = emptyMap()
+    // Broader "accept" list (e.g. conjugations): recognised as real words but never targets.
+    private var acceptAll: List<String> = emptyList()
+    private var acceptTyped: Set<String> = emptySet()        // folded forms, current length
+    private var acceptLang: String? = null
     private var loadingDialog: AlertDialog? = null
     private var strictMode = false
     private var hardMode = false
@@ -487,7 +494,7 @@ class MainActivity : Activity() {
         }
         val guess = (0 until wordLen).joinToString("") { tiles[currentRow][it].text.toString() }
 
-        if (!dailyMode && strictMode && currentLang.url != null && !answersTyped.contains(guess)) {
+        if (!dailyMode && strictMode && currentLang.url != null && !isKnownWord(guess)) {
             toast("Not in word list")
             return
         }
@@ -516,7 +523,7 @@ class MainActivity : Activity() {
         announce("Guess ${currentRow + 1}: $inPlace in the right place, $inWord in the word")
 
         // If the guess is a real word, show its original spelling (with umlauts) and a "?".
-        if (!dailyMode && answersTyped.contains(guess)) {
+        if (!dailyMode && isKnownWord(guess)) {
             val display = if (guess == targetTyped) target else (typedToOriginal[guess] ?: guess)
             for (c in 0 until wordLen) tiles[currentRow][c].text = display[c].toString()
             hintButtons[currentRow].contentDescription = "Look up $display"
@@ -592,11 +599,105 @@ class MainActivity : Activity() {
     }
 
     /**
+     * "?" entry point. If the current language ships a self-hosted definition list (same
+     * language), show the definition directly — offline after the first fetch, no Gemini.
+     * Otherwise (or in daily mode, which uses English words) fall back to the options menu.
+     */
+    private fun lookUpWord(word: String) {
+        if (!dailyMode && currentLang.defsUrl.isNotEmpty()) {
+            showDefinition(word, currentLang)
+        } else {
+            lookUpMenu(word)
+        }
+    }
+
+    // Parsed definition map for the currently loaded language (lazy; kept in memory).
+    private var defsMap: Map<String, String>? = null
+    private var defsMapLang: String? = null
+
+    /** Shows only the definition of [word] from [lang]'s def list, loading it if needed. */
+    private fun showDefinition(word: String, lang: WordLists.Language) {
+        val cached = defsMap
+        if (cached != null && defsMapLang == lang.code) {
+            presentDefinition(word, lang, cached)
+            return
+        }
+        showLoading(true)
+        Thread {
+            try {
+                val map = parseDefs(readDefsJson(lang))
+                ifAlive {
+                    defsMap = map; defsMapLang = lang.code
+                    showLoading(false)
+                    presentDefinition(word, lang, map)
+                }
+            } catch (e: Exception) {
+                // Network/parse trouble — don't dead-end; offer the usual options instead.
+                ifAlive { showLoading(false); lookUpMenu(word) }
+            }
+        }.start()
+    }
+
+    /** Reads the def JSON from the on-device cache, downloading (and caching) it once. */
+    private fun readDefsJson(lang: WordLists.Language): String {
+        val cache = File(filesDir, "defs_${lang.code}_v2.json")
+        if (cache.exists()) return cache.readText(Charsets.UTF_8)
+        val text = downloadText(lang.defsUrl)
+        cache.writeText(text, Charsets.UTF_8)
+        return text
+    }
+
+    private fun parseDefs(json: String): Map<String, String> {
+        val obj = JSONObject(json)
+        val map = HashMap<String, String>(obj.length() * 2)
+        val keys = obj.keys()
+        while (keys.hasNext()) { val k = keys.next(); map[k] = obj.getString(k) }
+        return map
+    }
+
+    /** Minimal robust text GET (a few retries with backoff). */
+    private fun downloadText(urlStr: String): String {
+        var last: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 15000; readTimeout = 20000; requestMethod = "GET"
+                }
+                try {
+                    conn.inputStream.bufferedReader(Charsets.UTF_8).use { return it.readText() }
+                } finally { conn.disconnect() }
+            } catch (e: Exception) {
+                last = e
+                try { Thread.sleep(300L * (attempt + 1)) } catch (_: InterruptedException) {}
+            }
+        }
+        throw last ?: IOException("download failed")
+    }
+
+    private fun presentDefinition(word: String, lang: WordLists.Language, map: Map<String, String>) {
+        val def = map[word.lowercase()]
+        if (def == null) { lookUpMenu(word); return } // not in the list — offer other options
+        val tv = TextView(this).apply {
+            text = def + "\n\n— " + lang.defsCredit
+            setTextColor(TEXT)
+            setTextIsSelectable(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setPadding(dp(22), dp(14), dp(22), dp(12))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(word)
+            .setView(ScrollView(this).apply { addView(tv) })
+            .setPositiveButton("Close", null)
+            .setNeutralButton("More…") { _, _ -> lookUpMenu(word) }
+            .show()
+    }
+
+    /**
      * Offers ways to define/translate [word]: Gemini (in-app AI answer), Google Translate
      * (web, source language pre-set so it isn't mis-detected), Wiktionary, or the system
      * text-processing chooser.
      */
-    private fun lookUpWord(word: String) {
+    private fun lookUpMenu(word: String) {
         val w = word.lowercase()
         val src = if (dailyMode || currentLang.code == "en_builtin") "en" else currentLang.code
         val dst = Locale.getDefault().language.ifBlank { "en" }
@@ -938,6 +1039,16 @@ class MainActivity : Activity() {
             })
             if (lang.homepage.isNotEmpty()) entry.addView(link("Source ›", lang.homepage))
             if (lang.licenseUrl.isNotEmpty()) entry.addView(link("Full licence text ›", lang.licenseUrl))
+            if (lang.defsCredit.isNotEmpty()) {
+                entry.addView(TextView(this).apply {
+                    text = "Definitions: ${lang.defsCredit}"
+                    setTextColor(HINT_COLOR)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setPadding(0, dp(2), 0, 0)
+                })
+                entry.addView(link("Definitions licence (CC BY-SA 3.0) ›",
+                    "https://creativecommons.org/licenses/by-sa/3.0/"))
+            }
             box.addView(entry)
         }
         AlertDialog.Builder(this)
@@ -1358,8 +1469,53 @@ class MainActivity : Activity() {
         answers = origs
         answersTyped = typedSet
         typedToOriginal = map
+        refreshAcceptTyped()          // fold the broad accept list into this length
+        ensureAcceptList(currentLang) // load it in the background if not present yet
         populateBoard()
         startNewGame()
+    }
+
+    /** A guess counts as a real word if it's a target word or in the broader accept list. */
+    private fun isKnownWord(typed: String): Boolean =
+        answersTyped.contains(typed) || acceptTyped.contains(typed)
+
+    /** Recomputes [acceptTyped] for the current length and merges spellings for display. */
+    private fun refreshAcceptTyped() {
+        if (acceptAll.isEmpty()) { acceptTyped = emptySet(); return }
+        val set = HashSet<String>()
+        val map = HashMap<String, String>(typedToOriginal)
+        for (orig in acceptAll) {
+            val typed = WordLists.typeableForm(orig, currentLang)
+            if (typed.length != wordLen) continue
+            set.add(typed)
+            if (!map.containsKey(typed)) map[typed] = orig
+        }
+        acceptTyped = set
+        typedToOriginal = map
+    }
+
+    /** Loads the language's accept list (cache or download) on a background thread, once. */
+    private fun ensureAcceptList(lang: WordLists.Language) {
+        if (lang.acceptUrl.isEmpty()) {
+            acceptAll = emptyList(); acceptTyped = emptySet(); acceptLang = lang.code
+            return
+        }
+        if (acceptLang == lang.code && acceptAll.isNotEmpty()) return
+        Thread {
+            try {
+                val cache = File(filesDir, "accept_${lang.code}_v1.txt")
+                val list = if (cache.exists()) {
+                    cache.readLines().filter { it.isNotBlank() }
+                } else {
+                    WordLists.fetchAndFilter(lang.copy(url = lang.acceptUrl)).also {
+                        cache.writeText(it.joinToString("\n"), Charsets.UTF_8)
+                    }
+                }
+                ifAlive { acceptAll = list; acceptLang = lang.code; refreshAcceptTyped() }
+            } catch (e: Exception) {
+                // Leave recognition to the answer list; try again on the next language apply.
+            }
+        }.start()
     }
 
     /** Returns the word list for [lang] if available offline (built-in or cached), else null. */
@@ -1371,9 +1527,9 @@ class MainActivity : Activity() {
         return words.ifEmpty { null }
     }
 
-    // _v6: bumped when NL moved to the self-hosted (pre-filtered) mirror; forces a re-download.
+    // _v8: NL answer pool split from a broader accept list (two-tier); re-download.
     private fun cacheFile(lang: WordLists.Language): File =
-        File(filesDir, "words_${lang.code}_v6.txt")
+        File(filesDir, "words_${lang.code}_v8.txt")
 
     private fun prefs(): SharedPreferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
