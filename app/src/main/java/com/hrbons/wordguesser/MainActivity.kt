@@ -640,7 +640,7 @@ class MainActivity : Activity() {
 
     /** Reads the def JSON from the on-device cache, downloading (and caching) it once. */
     private fun readDefsJson(lang: WordLists.Language): String {
-        val cache = File(filesDir, "defs_${lang.code}_v2.json")
+        val cache = File(filesDir, "defs_${lang.code}_v3.json")
         if (cache.exists()) return cache.readText(Charsets.UTF_8)
         val text = downloadText(lang.defsUrl)
         cache.writeText(text, Charsets.UTF_8)
