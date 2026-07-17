@@ -67,10 +67,18 @@ Built by scripts in `dist/wordlists/`, hosted at `…/wordlists/`. Two-tier:
 - `nl-accept.txt` — recognition list (~65.85k): all valid OpenTaal words incl. conjugations
   (accepted as guesses, show "?", but never used as target answers).
 - `nl-defs.json` — {word: definition} for ALL 65,851 accept words (100% coverage): 60,367 from
-  Dutch Wiktionary (CC BY-SA 3.0, credited) + 5,484 original CC0 defs written for the gaps.
+  Dutch Wiktionary (CC BY-SA 3.0, credited) + 5,484 original CC0 defs written for the gaps,
+  **plus ~2,801 extra base-word defs** (out-of-range infinitives/nouns like `verkennen`, `rol`)
+  used only as form-of resolution targets — never guesses/answers (68,652 entries total).
+- **Form-of resolution:** many accept words are pure grammatical pointers (e.g. `verkende` →
+  "enkelvoud verleden tijd van verkennen"). `MainActivity.formOfBase`/`resolveFormOf` detect these
+  via the `FORM_OF_WORDS` token whitelist (every word before the final "… van <base>" must be
+  grammatical, so "gemaakt van beton" / "het vormen van bubbels" stay untouched) and show the
+  base word's real definition instead, keeping the grammatical note. Bases outside the 4-8 filter
+  are supplied by `augment-nl-defs.py` (and now also by `build-nl-defs.py` on a full rebuild).
 - App: `Language` has `url` (answers), `acceptUrl` (recognition), `defsUrl`+`defsCredit`.
   "?" shows the definition directly & offline (`showDefinition`), Gemini only as a fallback
-  when a word has no gloss. Caches: `words_nl_v8.txt`, `accept_nl_v1.txt`, `defs_nl_v3.json`.
+  when a word has no gloss. Caches: `words_nl_v8.txt`, `accept_nl_v1.txt`, `defs_nl_v4.json`.
 - See memory `nl-defs-pipeline.md`. LESSON: generating all 65k defs by LLM hit the session
   limit; only gap-filling (~5.5k) is affordable.
 

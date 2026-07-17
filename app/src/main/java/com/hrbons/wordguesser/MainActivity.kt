@@ -40,15 +40,66 @@ import org.json.JSONObject
  */
 class MainActivity : Activity() {
 
-    private companion object {
+    internal companion object {
         const val ROWS = 6
         const val DEFAULT_LEN = 5
 
-        // Formulaic form-of glosses whose base word usually has a real definition:
-        // "meervoud van het zelfstandig naamwoord X", "verkleinvorm van X".
-        val FORM_OF = Regex(
-            "^(meervoud|verkleinvorm) van (?:het zelfstandig naamwoord )?(\\S+?)\\.?$",
-            RegexOption.IGNORE_CASE)
+        // Grammatical words that make up formulaic Dutch "form-of" glosses, e.g.
+        // "tweede persoon enkelvoud tegenwoordige tijd van rollen" or "verbogen vorm
+        // van de stellende trap van aardig". Such glosses describe an inflected form
+        // rather than a meaning, so we resolve them to the base word's real definition
+        // (see formOfBase / resolveFormOf). A gloss counts as form-of only when EVERY
+        // word before the final "… van <base>" is in this set — real definitions such
+        // as "gemaakt van beton" or "het vormen van bubbels" contain content words and
+        // are left untouched. ("vormen" is deliberately absent for that reason.)
+        val FORM_OF_WORDS = setOf(
+            "van", "de", "het",
+            "eerste", "tweede", "derde", "persoon",
+            "enkelvoud", "meervoud",
+            "tegenwoordige", "verleden", "tijd",
+            "voltooid", "onvoltooid", "deelwoord",
+            "verbogen", "onverbogen", "vorm",
+            "stellende", "vergrotende", "overtreffende", "trap",
+            "partitief", "genitief", "datief", "nominatief", "accusatief",
+            "aanvoegende", "gebiedende", "wijs",
+            "vervoeging", "verbuiging",
+            "beklemtoonde", "onbeklemtoonde", "nadrukkelijke", "onnadrukkelijke",
+            "onzijdig", "mannelijk", "vrouwelijk", "mannelijke", "vrouwelijke",
+            "onpersoonlijke", "persoonlijke",
+            "verkleinvorm", "verkleinwoord", "verkorting",
+            "verouderde", "oude", "dialectvorm", "dialectische",
+            "schrijfwijze", "spelling", "spellingvariant", "spellingsvariant",
+            "zelfstandig", "naamwoord", "bijvoeglijk", "werkwoord", "bijwoord", "telwoord",
+        )
+
+        /**
+         * If [def] is a purely grammatical "… van <base>" form-of gloss, returns the
+         * lower-cased <base> word; otherwise null. The base is the last token; every
+         * word before the final " van " must be in [FORM_OF_WORDS].
+         */
+        fun formOfBase(def: String): String? {
+            val trimmed = def.trim().trimEnd('.')
+            val idx = trimmed.lowercase().lastIndexOf(" van ")
+            if (idx < 0) return null
+            val base = trimmed.substring(idx + 5).trim().lowercase()
+            if (base.isEmpty() || base.any { it == ' ' }) return null
+            val words = trimmed.substring(0, idx).lowercase().split(' ').filter { it.isNotEmpty() }
+            if (words.isEmpty() || words.any { it !in FORM_OF_WORDS }) return null
+            return base
+        }
+
+        /**
+         * Resolves a formulaic form-of gloss (e.g. a verb conjugation or comparative
+         * form) to its base word's real definition, keeping the grammatical note. Leaves
+         * [def] untouched when it isn't a form-of gloss, when the base has no entry, or
+         * when the base itself is only another form-of gloss (avoids cryptic chaining).
+         */
+        fun resolveFormOf(def: String, map: Map<String, String>): String {
+            val base = formOfBase(def) ?: return def
+            val baseDef = map[base]?.trim().orEmpty()
+            if (baseDef.isEmpty() || formOfBase(baseDef) != null) return def
+            return "${def.trim().trimEnd('.')}:\n\n$baseDef"
+        }
 
         // Palette (classic dark Wordle look).
         const val BG = 0xFF121213.toInt()
@@ -458,26 +509,36 @@ class MainActivity : Activity() {
         return if (rows >= 4) dp(52) else dp(60)
     }
 
-    /** Tile edge length (px): as large as fits BOTH the screen width (given [n] columns) and
-     *  the height left between the header and the keyboard, so the board fills the screen. */
-    private fun tileSizeFor(n: Int): Int {
+    /** Tile HEIGHT (px): driven only by the vertical space left between the header and the
+     *  keyboard, so the board fills the same height regardless of word length. */
+    private fun tileHeightPx(): Int {
         val dm = resources.displayMetrics
-        // Width budget: root padding + leading spacer + trailing "?" + per-tile L/R margins.
-        val reservedW = dp(12) * 2 + dp(28) * 2
-        val byWidth = (dm.widthPixels - reservedW) / n - dp(8)
-        // Height budget: fit ROWS of tiles above the keyboard (and its optional extra row).
         val keyRows = KEY_ROWS.size + if (currentLang.extra.isNotEmpty()) 1 else 0
         val keyboardH = keyRows * (keyHeightPx() + dp(8))
         val reservedH = dp(60) /*header*/ + dp(44) /*length row*/ + dp(8) /*spacer*/ + keyboardH +
             dp(12) * 2 /*root padding*/ + dp(30) /*message + slack*/
         val byHeight = (dm.heightPixels - reservedH) / ROWS - dp(8)
-        return minOf(byWidth, byHeight).coerceIn(dp(30), dp(72))
+        return byHeight.coerceIn(dp(30), dp(72))
+    }
+
+    /** Tile WIDTH (px) for [n] columns: as wide as fits the screen width, but never wider than
+     *  the tile height (so tiles stay square-or-narrower). Longer words → narrower tiles, but
+     *  the board keeps its full height. */
+    private fun tileWidthFor(n: Int): Int {
+        val dm = resources.displayMetrics
+        // Width budget: root padding + leading spacer + trailing "?" + per-tile L/R margins.
+        // Keep the horizontal margins small so long words don't leave the tiles too narrow.
+        val reservedW = dp(12) * 2 + dp(20) * 2
+        val byWidth = (dm.widthPixels - reservedW) / n - dp(4)
+        return byWidth.coerceIn(dp(24), tileHeightPx())
     }
 
     /** (Re)builds the ROWS×[wordLen] grid, sizing tiles to fit the current word length. */
     private fun populateBoard() {
         boardContainer.removeAllViews()
-        val size = tileSizeFor(wordLen)
+        val h = tileHeightPx()
+        val w = tileWidthFor(wordLen)
+        val textPx = minOf(w, h).toFloat()
         val hints = arrayOfNulls<TextView>(ROWS)
         val counts = arrayOfNulls<TextView>(ROWS)
         tiles = Array(ROWS) { r ->
@@ -487,7 +548,7 @@ class MainActivity : Activity() {
             }
             // Leading spacer balances the trailing "?" so the tiles stay centered.
             rowLayout.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(28), size)
+                layoutParams = LinearLayout.LayoutParams(dp(20), h)
                 visibility = View.INVISIBLE
             })
             val rowTiles = Array(wordLen) { _ ->
@@ -495,12 +556,12 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER
                     setTextColor(TEXT)
                     setTypeface(Typeface.DEFAULT_BOLD)
-                    setTextSize(TypedValue.COMPLEX_UNIT_PX, size * 0.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_PX, textPx * 0.5f)
                     background = tileDrawable(Color.TRANSPARENT, TILE_BORDER_EMPTY)
                     // Skipped by TalkBack until a submitted guess gives it a spoken label.
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                    val lp = LinearLayout.LayoutParams(size, size)
-                    lp.setMargins(dp(4), dp(4), dp(4), dp(4))
+                    val lp = LinearLayout.LayoutParams(w, h)
+                    lp.setMargins(dp(2), dp(4), dp(2), dp(4))
                     layoutParams = lp
                 }
                 rowLayout.addView(tv)
@@ -513,8 +574,8 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 setTextColor(HINT_COLOR)
                 setTypeface(Typeface.DEFAULT_BOLD)
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, (size * 0.45f).coerceAtMost(dp(24).toFloat()))
-                layoutParams = LinearLayout.LayoutParams(dp(28), size)
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, (textPx * 0.45f).coerceAtMost(dp(24).toFloat()))
+                layoutParams = LinearLayout.LayoutParams(dp(20), h)
                 visibility = View.INVISIBLE
                 setOnClickListener { lookUpRow(r) }
             }
@@ -724,6 +785,7 @@ class MainActivity : Activity() {
             else -> {
                 currentRow++
                 currentCol = 0
+                if (dailyMode) saveDailyProgress()
             }
         }
     }
@@ -816,7 +878,7 @@ class MainActivity : Activity() {
 
     /** Reads the def JSON from the on-device cache, downloading (and caching) it once. */
     private fun readDefsJson(lang: WordLists.Language): String {
-        val cache = File(filesDir, "defs_${lang.code}_v3.json")
+        val cache = File(filesDir, "defs_${lang.code}_v4.json")
         if (cache.exists()) return cache.readText(Charsets.UTF_8)
         val text = downloadText(lang.defsUrl)
         cache.writeText(text, Charsets.UTF_8)
@@ -867,21 +929,6 @@ class MainActivity : Activity() {
             .setPositiveButton("Close", null)
             .setNeutralButton("More…") { _, _ -> lookUpMenu(word) }
             .show()
-    }
-
-    /**
-     * Some entries are purely formulaic form-of glosses (e.g. "meervoud van het zelfstandig
-     * naamwoord aandeel") that don't tell you what the word means. When we can, resolve to the
-     * base word's real definition instead, keeping a short note of the relationship.
-     */
-    private fun resolveFormOf(def: String, map: Map<String, String>): String {
-        val m = FORM_OF.matchEntire(def.trim()) ?: return def
-        val kind = m.groupValues[1].lowercase()
-        val base = m.groupValues[2].lowercase()
-        val baseDef = map[base]?.trim() ?: return def
-        if (FORM_OF.matches(baseDef)) return def // don't chain into another form-of gloss
-        val label = if (kind.startsWith("verklein")) "Verkleinvorm" else "Meervoud"
-        return "$label van “$base”:\n\n$baseDef"
     }
 
     /**
@@ -1386,21 +1433,74 @@ class MainActivity : Activity() {
         onReady()
     }
 
+    /** Prefs key for a daily's *in-progress* guesses (distinct from the finished-result key). */
+    private fun dailyProgKey() = "dailyprog_${dailyLangCode}_${dailyDateKey}_$dailyLen"
+
+    /** Saves the current daily's guesses after each guess so leaving it can't reset progress. */
+    private fun saveDailyProgress() {
+        prefs().edit().putString(
+            dailyProgKey(), listOf(dailyStartMs, dailyGuesses.joinToString(",")).joinToString("|")
+        ).apply()
+    }
+
+    /** Paints an already-submitted guess [g] into board row [r] exactly as [onEnter] would (colours
+     *  or hard-mode counts, plus the original spelling + look-up "?"). Used to restore an
+     *  in-progress daily and to redraw a finished one. */
+    private fun renderGuessRow(r: Int, g: String) {
+        val states = evaluate(g, targetTyped)
+        if (hardMode) {
+            val inPlace = states.count { it == ST_CORRECT }
+            val inWord = states.count { it == ST_CORRECT || it == ST_PRESENT }
+            countViews[r].text = "$inWord in word · $inPlace in right place"
+            countViews[r].visibility = View.VISIBLE
+            for (c in g.indices) { tiles[r][c].text = g[c].toString(); describeTile(r, c, g[c], null) }
+        } else {
+            for (c in g.indices) {
+                val color = when (states[c]) {
+                    ST_CORRECT -> CORRECT
+                    ST_PRESENT -> PRESENT
+                    else -> ABSENT
+                }
+                tiles[r][c].text = g[c].toString()
+                tiles[r][c].background = tileDrawable(color, color)
+                updateKeyColor(g[c], states[c])
+                describeTile(r, c, g[c], states[c])
+            }
+        }
+        if (isKnownWord(g)) {
+            val display = if (g == targetTyped) target else (typedToOriginal[g] ?: g)
+            for (c in g.indices) tiles[r][c].text = display[c].toString()
+            hintButtons[r].contentDescription = "Look up $display"
+            hintButtons[r].visibility = View.VISIBLE
+        }
+    }
+
     private fun startDaily(date: String, len: Int, pool: List<String>) {
         dailyMode = true
         dailyLen = len
         dailyDateKey = date
         dailyLangCode = currentLang.code
         dailyTargetWord = pool[dailyIndex(len, pool.size, dailyLangCode)]
-        dailyGuesses.clear()
-        dailyStartMs = System.currentTimeMillis()
         target = dailyTargetWord
         targetTyped = WordLists.typeableForm(dailyTargetWord, currentLang)
-        if (wordLen != len) { wordLen = len; populateBoard() }
+        // Rebuild the answer/accept match index for this length so guesses are recognised and the
+        // "?" look-up shows — even when the daily's length differs from the one currently loaded.
+        rebuildForLength(len)
+        dailyGuesses.clear()
         currentRow = 0
         currentCol = 0
         gameOver = false
         clearBoard()
+        // Restore an in-progress daily (saved after every guess) so leaving it — by switching word
+        // length or toggling to a normal game — can't reset it and let you retry it (anti-cheat).
+        val prog = prefs().getString(dailyProgKey(), null)?.split("|")
+        dailyStartMs = prog?.getOrNull(0)?.toLongOrNull() ?: System.currentTimeMillis()
+        for (g in prog?.getOrNull(1)?.split(",")?.filter { it.isNotBlank() }.orEmpty()) {
+            if (currentRow >= ROWS || g.length != len) break
+            renderGuessRow(currentRow, g)
+            dailyGuesses.add(g)
+            currentRow++
+        }
         updateLengthButtons()
         toast("Daily · $len letters")
     }
@@ -1411,7 +1511,10 @@ class MainActivity : Activity() {
         val record = listOf(
             if (won) "W" else "L", seconds, guessCount, dailyTargetWord, dailyGuesses.joinToString(",")
         ).joinToString("|")
-        prefs().edit().putString("daily_${dailyLangCode}_${dailyDateKey}_$dailyLen", record).apply()
+        prefs().edit()
+            .putString("daily_${dailyLangCode}_${dailyDateKey}_$dailyLen", record)
+            .remove(dailyProgKey()) // in-progress state is now superseded by the final result
+            .apply()
         updateLengthButtons() // reflect the fresh ✓ / – badge right away
         recordResult(won, currentRow) // daily counts toward the current language's statistics
         if (won) promptSubmit(seconds, guessCount)
@@ -1472,30 +1575,15 @@ class MainActivity : Activity() {
         dailyTargetWord = targetWord
         target = targetWord
         targetTyped = WordLists.typeableForm(targetWord, currentLang)
-        if (wordLen != len) { wordLen = len; populateBoard() }
+        // Rebuild the match index for this length so the replayed guesses are recognised and the
+        // "?" look-up shows (see startDaily / rebuildForLength).
+        rebuildForLength(len)
         currentRow = 0; currentCol = 0; gameOver = true
         clearBoard()
         updateLengthButtons()
         for ((r, g) in guesses.withIndex()) {
             if (r >= ROWS || g.length != len) break
-            val states = evaluate(g, targetTyped)
-            for (c in 0 until len) {
-                tiles[r][c].text = g[c].toString()
-                val color = when (states[c]) {
-                    ST_CORRECT -> CORRECT
-                    ST_PRESENT -> PRESENT
-                    else -> ABSENT
-                }
-                tiles[r][c].background = tileDrawable(color, color)
-                describeTile(r, c, g[c], states[c])
-            }
-            // Show its original spelling (with umlauts) and a "?" for look-up, as in a live game.
-            if (isKnownWord(g)) {
-                val display = if (g == targetTyped) target else (typedToOriginal[g] ?: g)
-                for (c in 0 until len) tiles[r][c].text = display[c].toString()
-                hintButtons[r].contentDescription = "Look up $display"
-                hintButtons[r].visibility = View.VISIBLE
-            }
+            renderGuessRow(r, g)
         }
         AlertDialog.Builder(this)
             .setTitle("Daily · $len letters (played)")
@@ -1620,6 +1708,16 @@ class MainActivity : Activity() {
      */
     private fun applyLength() {
         wordLen = prefs().getInt(PREF_LEN, DEFAULT_LEN).coerceIn(currentLang.minLen, currentLang.maxLen)
+        rebuildForLength(wordLen)
+        startNewGame()
+        updateLengthButtons()
+    }
+
+    /** Sets [wordLen] to [len] and rebuilds the answer/accept match indexes and the board for it.
+     *  Shared by [applyLength] and the daily entry points so a daily played at a length other than
+     *  the one currently loaded still recognises words (and thus shows the "?" look-up). */
+    private fun rebuildForLength(len: Int) {
+        wordLen = len
         val origs = ArrayList<String>()
         val typedSet = HashSet<String>()
         val map = HashMap<String, String>()
@@ -1638,8 +1736,6 @@ class MainActivity : Activity() {
         refreshAcceptTyped()          // fold the broad accept list into this length
         ensureAcceptList(currentLang) // load it in the background if not present yet
         populateBoard()
-        startNewGame()
-        updateLengthButtons()
     }
 
     /** A guess counts as a real word if it's a target word or in the broader accept list. */
