@@ -7,9 +7,9 @@ import java.net.URL
 /**
  * Public arcade-style leaderboard via dreamlo (a free, no-signup service).
  *
- * One dreamlo board holds every daily entry; each entry's name encodes the day and length
- * as "<NAME>_<yyyymmdd>_<len>" so we can filter to a single daily client-side and rank by
- * fewest guesses, then fastest time. Only solved games are submitted.
+ * One dreamlo board holds every daily entry; each entry's name encodes the language, day and
+ * length as "<NAME>_<lang>_<yyyymmdd>_<len>" so we can filter to a single daily (per language)
+ * client-side and rank by fewest guesses, then fastest time. Only solved games are submitted.
  *
  * NOTE: this free board is HTTP-only (see the network-security-config), and the write key
  * ships in the app — fine for a casual leaderboard, but a determined user could tamper.
@@ -60,20 +60,22 @@ object Leaderboard {
     }
 
     @Throws(IOException::class)
-    fun submit(name: String, guesses: Int, seconds: Int, dateKey: String, len: Int) {
-        val entry = "${sanitizeName(name)}_${dateKey}_$len"
+    fun submit(name: String, guesses: Int, seconds: Int, langCode: String, dateKey: String, len: Int) {
+        val entry = "${sanitizeName(name)}_${langCode}_${dateKey}_$len"
         val body = read("$BASE/$PRIVATE/add/$entry/$guesses/$seconds")
         if (body.startsWith("ERROR")) throw IOException(body.trim())
     }
 
-    /** Entries for one day + length, ranked by fewest guesses then fastest time. */
+    /** Entries for one language + day + length, ranked by fewest guesses then fastest time. */
     @Throws(IOException::class)
-    fun fetch(dateKey: String, len: Int): List<Entry> = rank(read("$BASE/$PUBLIC/pipe"), dateKey, len)
+    fun fetch(langCode: String, dateKey: String, len: Int): List<Entry> =
+        rank(read("$BASE/$PUBLIC/pipe"), langCode, dateKey, len)
 
     /** Parses dreamlo pipe output (name|score|seconds|text|datetime|rank), filters to the given
-     *  day+length (encoded in the name suffix) and ranks by fewest guesses then fastest time. */
-    internal fun rank(pipeBody: String, dateKey: String, len: Int): List<Entry> {
-        val suffix = "_${dateKey}_$len"
+     *  language + day + length (encoded in the name suffix) and ranks by fewest guesses then
+     *  fastest time. */
+    internal fun rank(pipeBody: String, langCode: String, dateKey: String, len: Int): List<Entry> {
+        val suffix = "_${langCode}_${dateKey}_$len"
         val out = ArrayList<Entry>()
         for (line in pipeBody.lineSequence()) {
             if (line.isBlank()) continue

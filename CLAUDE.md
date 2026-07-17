@@ -34,7 +34,9 @@ built in code so the release APK stays ~72 KB. Package: `com.hrbons.wordguesser`
 Wordle scoring; 17 languages via downloadable word lists; strict mode; hard mode; variable
 word length 4–8 (board resizes); accent folding + accented display on match; language extra
 keys (DE ß, Nordic Æ/Ø, PL Ł, HR Đ); TalkBack; per-language/settings statistics; **daily
-puzzle per word length** (📅 picker) + public dreamlo leaderboard; **word lookup via "?"**;
+puzzle per language + word length** (📅 picker; uses the current language's answer pool, and
+counts toward that language's stats) + public dreamlo leaderboard **scoped per language**;
+**word lookup via "?"**;
 loss reveal; Ko-fi nudge (once/day, no toggle); download retry + lifecycle-safe callbacks.
 
 Keyboard: DEL bottom-left (before Z), ENTER bottom-right (user-chosen order — don't reorder).

@@ -18,6 +18,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -43,6 +44,12 @@ class MainActivity : Activity() {
         const val ROWS = 6
         const val DEFAULT_LEN = 5
 
+        // Formulaic form-of glosses whose base word usually has a real definition:
+        // "meervoud van het zelfstandig naamwoord X", "verkleinvorm van X".
+        val FORM_OF = Regex(
+            "^(meervoud|verkleinvorm) van (?:het zelfstandig naamwoord )?(\\S+?)\\.?$",
+            RegexOption.IGNORE_CASE)
+
         // Palette (classic dark Wordle look).
         const val BG = 0xFF121213.toInt()
         const val TEXT = 0xFFFFFFFF.toInt()
@@ -53,6 +60,9 @@ class MainActivity : Activity() {
         const val ABSENT = 0xFF3A3A3C.toInt()
         const val KEY_DEFAULT = 0xFF818384.toInt()
         const val HINT_COLOR = 0xFF9AA0A6.toInt()
+        const val DAILY = 0xFF4E7AC7.toInt() // active length in daily mode (gold = normal mode)
+        const val DAILY_WON = 0xFF3DDC84.toInt()  // ✓ badge — today's daily solved
+        const val DAILY_LOST = 0xFFFF5A5A.toInt() // – badge — today's daily played but not solved
 
         // Tile evaluation states.
         const val ST_ABSENT = 0
@@ -102,6 +112,9 @@ class MainActivity : Activity() {
 
     // Language / word-list state.
     private lateinit var langButton: Button
+    private lateinit var lengthRow: LinearLayout        // quick word-length buttons under the header
+    private val lengthButtons = HashMap<Int, Button>()  // length → its button, for highlighting
+    private val lengthBadges = HashMap<Int, TextView>() // length → its corner daily-result badge
     private var currentLang: WordLists.Language = WordLists.LANGUAGES[0]
     private var answersAll: List<String> = emptyList()       // all downloaded lengths
     private var answers: List<String> = emptyList()          // original spellings, current length
@@ -115,14 +128,17 @@ class MainActivity : Activity() {
     private var strictMode = false
     private var hardMode = false
 
-    // Daily puzzle state (uses a fixed shared English pool so the word is global per day+length).
+    // Daily puzzle state. The daily is per language: the word is global for everyone playing the
+    // same language on the same UTC day + length (built from that language's answer pool).
     private var dailyMode = false
     private var dailyLen = 0
     private var dailyDateKey = ""
+    private var dailyLangCode = ""
     private var dailyTargetWord = ""
     private var dailyStartMs = 0L
     private val dailyGuesses = ArrayList<String>()
     private var dailyPool: Map<Int, List<String>>? = null
+    private var dailyPoolLang: String? = null   // which language dailyPool was built for
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -145,6 +161,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(buildHeader())
+        root.addView(buildLengthRow())        // one button per word length, under the header
         root.addView(spacer(dp(8)))
         root.addView(buildBoard())            // weighted: fills the space between header + keyboard
         root.addView(buildReveal())
@@ -252,14 +269,16 @@ class MainActivity : Activity() {
             maxLines = 1
             layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         }
-        val daily = smallButton("📅") { openDaily() }.apply { contentDescription = "Daily puzzle" }
+        // The per-length row below the header now covers the daily, so the old "📅" picker
+        // makes way for a direct Statistics button (daily results count toward these stats too).
+        val stats = smallButton("📊") { showStats() }.apply { contentDescription = "Statistics" }
         val settings = smallButton("⚙") { showSettings() }.apply { contentDescription = "Settings" }
         val newGame = smallButton("New") {
             if (dailyMode) applyLength() else startNewGame() // restore the normal length after a daily
         }.apply { contentDescription = "New game" }
         header.addView(langButton)
         header.addView(title)
-        header.addView(daily)
+        header.addView(stats)
         header.addView(settings)
         header.addView(newGame)
         return header
@@ -280,6 +299,144 @@ class MainActivity : Activity() {
         lp.setMargins(dp(2), 0, dp(2), 0)
         layoutParams = lp
         setOnClickListener { onClick() }
+    }
+
+    /** Row of quick word-length buttons under the header. Tapping a *different* length jumps you
+     *  there: into today's daily if you haven't played it yet, otherwise a normal game. Tapping
+     *  the length you're *already* on toggles that length between daily and normal. The active
+     *  button is tinted to show which mode it's in (gold = normal, blue = daily). */
+    private fun buildLengthRow(): View {
+        lengthRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        }
+        populateLengthRow()
+        return lengthRow
+    }
+
+    /** (Re)builds the length buttons for the current language's selectable range. */
+    private fun populateLengthRow() {
+        if (!::lengthRow.isInitialized) return
+        lengthRow.removeAllViews()
+        lengthButtons.clear()
+        lengthBadges.clear()
+        for (len in currentLang.minLen..currentLang.maxLen) {
+            lengthRow.addView(lengthCell(len))
+        }
+        updateLengthButtons()
+    }
+
+    /** A length button plus a small corner badge showing today's daily result for that length. */
+    private fun lengthCell(len: Int): View {
+        val btn = Button(this).apply {
+            text = len.toString()
+            isAllCaps = false
+            setTextColor(TEXT)
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            background = keyDrawable(KEY_DEFAULT)
+            stateListAnimator = null
+            setPadding(0, dp(6), 0, dp(6))
+            layoutParams = FrameLayout.LayoutParams(dp(46), WRAP_CONTENT)
+            setOnClickListener { onLengthTap(len) }
+        }
+        val badge = TextView(this).apply {
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            includeFontPadding = false
+            setShadowLayer(dp(2).toFloat(), 0f, 0f, 0xFF000000.toInt()) // legible on any tint
+            visibility = View.GONE
+            isClickable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            layoutParams = FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                setMargins(0, 0, dp(4), dp(1))
+            }
+        }
+        lengthButtons[len] = btn
+        lengthBadges[len] = badge
+        return FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                setMargins(dp(3), 0, dp(3), 0)
+            }
+            addView(btn)
+            addView(badge) // on top of the button, in its bottom-right corner
+        }
+    }
+
+    /** Tints the active length's button to show its mode (blue = daily, gold = normal) and puts a
+     *  green "✓" / red "–" badge in each button's corner for today's daily result. */
+    private fun updateLengthButtons() {
+        if (!::lengthRow.isInitialized) return
+        val date = todayKey()
+        for ((len, btn) in lengthButtons) {
+            btn.background = keyDrawable(
+                when {
+                    len != wordLen -> KEY_DEFAULT
+                    dailyMode -> DAILY
+                    else -> PRESENT
+                }
+            )
+            val badge = lengthBadges[len]
+            when (prefs().getString("daily_${currentLang.code}_${date}_$len", null)?.firstOrNull()) {
+                'W' -> {
+                    badge?.apply { text = "✓"; setTextColor(DAILY_WON); visibility = View.VISIBLE }
+                    btn.contentDescription = "$len letters, daily solved"
+                }
+                'L' -> {
+                    badge?.apply { text = "–"; setTextColor(DAILY_LOST); visibility = View.VISIBLE }
+                    btn.contentDescription = "$len letters, daily not solved"
+                }
+                else -> {
+                    badge?.visibility = View.GONE
+                    btn.contentDescription = "$len letters"
+                }
+            }
+        }
+    }
+
+    /** Handles a tap on the length-[len] button (see [buildLengthRow]). */
+    private fun onLengthTap(len: Int) {
+        // Tapping the length we're already on toggles it between daily and normal.
+        if (len == wordLen) {
+            if (dailyMode) startNormalAt(len) else openDailyFor(len)
+            return
+        }
+        // A different length: daily if you haven't played it yet today, otherwise normal.
+        val date = todayKey()
+        val dailyPlayed = prefs().getString("daily_${currentLang.code}_${date}_$len", null) != null
+        if (dailyPlayed) {
+            startNormalAt(len)
+            return
+        }
+        ensureDailyPool {
+            // Falls back to a normal game if this language has no daily words at this length.
+            val pool = dailyPool?.get(len)
+            if (pool.isNullOrEmpty()) { startNormalAt(len); return@ensureDailyPool }
+            startDaily(date, len, pool)
+        }
+    }
+
+    /** Enters a normal game at [len]: continues the current one if we're already playing that
+     *  length outside a daily, otherwise starts a fresh game at that length. */
+    private fun startNormalAt(len: Int) {
+        if (!dailyMode && wordLen == len && !gameOver) {
+            toast("$len letters"); return // already playing this length — keep going
+        }
+        prefs().edit().putInt(PREF_LEN, len).apply()
+        applyLength() // rebuilds the board, leaves any daily, starts fresh at len
+    }
+
+    /** Enters today's daily for [len]: shows the result if already played, else starts it. */
+    private fun openDailyFor(len: Int) {
+        ensureDailyPool {
+            val date = todayKey()
+            val pool = dailyPool?.get(len)
+            if (pool.isNullOrEmpty()) { toast("No daily · $len letters"); return@ensureDailyPool }
+            val saved = prefs().getString("daily_${currentLang.code}_${date}_$len", null)
+            if (saved != null) showDailyResult(date, len, pool, saved) else startDaily(date, len, pool)
+        }
     }
 
     private fun buildBoard(): View {
@@ -311,7 +468,7 @@ class MainActivity : Activity() {
         // Height budget: fit ROWS of tiles above the keyboard (and its optional extra row).
         val keyRows = KEY_ROWS.size + if (currentLang.extra.isNotEmpty()) 1 else 0
         val keyboardH = keyRows * (keyHeightPx() + dp(8))
-        val reservedH = dp(60) /*header*/ + dp(8) /*spacer*/ + keyboardH +
+        val reservedH = dp(60) /*header*/ + dp(44) /*length row*/ + dp(8) /*spacer*/ + keyboardH +
             dp(12) * 2 /*root padding*/ + dp(30) /*message + slack*/
         val byHeight = (dm.heightPixels - reservedH) / ROWS - dp(8)
         return minOf(byWidth, byHeight).coerceIn(dp(30), dp(72))
@@ -539,7 +696,9 @@ class MainActivity : Activity() {
         announce("Guess ${currentRow + 1}: $inPlace in the right place, $inWord in the word")
 
         // If the guess is a real word, show its original spelling (with umlauts) and a "?".
-        if (!dailyMode && isKnownWord(guess)) {
+        // Works in daily mode too — the daily uses the current language's own words, so its
+        // guesses can be looked up just like a normal game's.
+        if (isKnownWord(guess)) {
             val display = if (guess == targetTyped) target else (typedToOriginal[guess] ?: guess)
             for (c in 0 until wordLen) tiles[currentRow][c].text = display[c].toString()
             hintButtons[currentRow].contentDescription = "Look up $display"
@@ -617,10 +776,11 @@ class MainActivity : Activity() {
     /**
      * "?" entry point. If the current language ships a self-hosted definition list (same
      * language), show the definition directly — offline after the first fetch, no Gemini.
-     * Otherwise (or in daily mode, which uses English words) fall back to the options menu.
+     * Otherwise fall back to the options menu. Works in daily mode too, since the daily now
+     * uses the current language's own words.
      */
     private fun lookUpWord(word: String) {
-        if (!dailyMode && currentLang.defsUrl.isNotEmpty()) {
+        if (currentLang.defsUrl.isNotEmpty()) {
             showDefinition(word, currentLang)
         } else {
             lookUpMenu(word)
@@ -691,8 +851,9 @@ class MainActivity : Activity() {
     }
 
     private fun presentDefinition(word: String, lang: WordLists.Language, map: Map<String, String>) {
-        val def = map[word.lowercase()]
-        if (def == null) { lookUpMenu(word); return } // not in the list — offer other options
+        val raw = map[word.lowercase()]
+        if (raw == null) { lookUpMenu(word); return } // not in the list — offer other options
+        val def = resolveFormOf(raw, map)
         val tv = TextView(this).apply {
             text = def + "\n\n— " + lang.defsCredit
             setTextColor(TEXT)
@@ -709,13 +870,28 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Some entries are purely formulaic form-of glosses (e.g. "meervoud van het zelfstandig
+     * naamwoord aandeel") that don't tell you what the word means. When we can, resolve to the
+     * base word's real definition instead, keeping a short note of the relationship.
+     */
+    private fun resolveFormOf(def: String, map: Map<String, String>): String {
+        val m = FORM_OF.matchEntire(def.trim()) ?: return def
+        val kind = m.groupValues[1].lowercase()
+        val base = m.groupValues[2].lowercase()
+        val baseDef = map[base]?.trim() ?: return def
+        if (FORM_OF.matches(baseDef)) return def // don't chain into another form-of gloss
+        val label = if (kind.startsWith("verklein")) "Verkleinvorm" else "Meervoud"
+        return "$label van “$base”:\n\n$baseDef"
+    }
+
+    /**
      * Offers ways to define/translate [word]: Gemini (in-app AI answer), Google Translate
      * (web, source language pre-set so it isn't mis-detected), Wiktionary, or the system
      * text-processing chooser.
      */
     private fun lookUpMenu(word: String) {
         val w = word.lowercase()
-        val src = if (dailyMode || currentLang.code == "en_builtin") "en" else currentLang.code
+        val src = if (currentLang.code == "en_builtin") "en" else currentLang.code
         val dst = Locale.getDefault().language.ifBlank { "en" }
         val translateUrl =
             "https://translate.google.com/?sl=$src&tl=$dst&text=${Uri.encode(w)}&op=translate"
@@ -738,7 +914,7 @@ class MainActivity : Activity() {
     }
 
     private fun geminiLookup(word: String) {
-        val srcName = if (dailyMode) "English" else langName(currentLang.code)
+        val srcName = langName(currentLang.code)
         val dstName = Locale.getDefault().getDisplayLanguage(Locale.ENGLISH).ifBlank { "English" }
         val prompt = if (isOwnLanguage()) {
             "Give a concise definition of the $srcName word \"$word\". Reply in $dstName."
@@ -778,7 +954,7 @@ class MainActivity : Activity() {
     }
 
     private fun sourceLangCode(): String =
-        if (dailyMode) "en" else if (currentLang.code == "en_builtin") "en" else currentLang.code
+        if (currentLang.code == "en_builtin") "en" else currentLang.code
 
     /** True when the word's language is the same as the device language (translation is pointless). */
     private fun isOwnLanguage(): Boolean =
@@ -865,6 +1041,7 @@ class MainActivity : Activity() {
         }
         langButton.text = currentLang.badge
         populateKeys()
+        populateLengthRow() // the selectable range can differ per language
         setWordSource(words) // → applyLength() rebuilds the board and starts the game
     }
 
@@ -1182,90 +1359,49 @@ class MainActivity : Activity() {
 
     private fun fmtTime(seconds: Int): String = "%d:%02d".format(seconds / 60, seconds % 60)
 
-    /** Deterministic index into the pool for today (UTC) + length — same for everyone. */
-    private fun dailyIndex(len: Int, size: Int): Int {
+    /** Deterministic index into the pool for today (UTC) + length + language — same for everyone
+     *  playing that language. String.hashCode is defined by spec, so the salt is stable. */
+    private fun dailyIndex(len: Int, size: Int, langCode: String): Int {
         val dayUtc = System.currentTimeMillis() / 86_400_000L
-        return (((dayUtc * 1000003L + len) % size + size) % size).toInt()
+        val salt = langCode.hashCode().toLong()
+        return (((dayUtc * 1000003L + len * 131L + salt) % size + size) % size).toInt()
     }
 
-    /** Groups the shared English list by word length (sorted, so indexing is stable). */
-    private fun buildDailyPool(lines: List<String>) {
-        dailyPool = lines.asSequence().map { it.trim() }.filter { it.isNotEmpty() }
-            .groupBy { it.length }.mapValues { it.value.sorted() }
+    /** Groups the current language's answer pool by *typeable* length (sorted, so indexing is
+     *  stable across devices). Uses [answersAll], which is already loaded for the language. */
+    private fun buildDailyPool() {
+        dailyPool = answersAll.asSequence()
+            .map { it.trim() }.filter { it.isNotEmpty() }
+            .groupBy { WordLists.typeableForm(it, currentLang).length }
+            .mapValues { it.value.sorted() }
+        dailyPoolLang = currentLang.code
     }
 
-    /** Ensures the shared English pool is loaded (downloading it once if needed), then runs [onReady]. */
+    /** Ensures the daily pool for the current language is built, then runs [onReady]. */
     private fun ensureDailyPool(onReady: () -> Unit) {
-        if (dailyPool != null) { onReady(); return }
-        val en = WordLists.LANGUAGES.first { it.code == "en" }
-        val cache = cacheFile(en)
-        if (cache.exists()) {
-            buildDailyPool(cache.readLines())
-            onReady()
-            return
+        if (dailyPool == null || dailyPoolLang != currentLang.code) {
+            if (answersAll.isEmpty()) { toast("Word list not loaded yet"); return }
+            buildDailyPool()
         }
-        AlertDialog.Builder(this)
-            .setTitle("Daily puzzle")
-            .setMessage("The daily uses a shared English word list, so everyone gets the same " +
-                "word each day. Download it once now?")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Download") { _, _ ->
-                showLoading(true)
-                Thread {
-                    try {
-                        val words = WordLists.fetchAndFilter(en)
-                        cache.writeText(words.joinToString("\n"))
-                        ifAlive { showLoading(false); buildDailyPool(words); onReady() }
-                    } catch (e: Exception) {
-                        ifAlive { showLoading(false); toast("Download failed: ${e.message}") }
-                    }
-                }.start()
-            }
-            .show()
-    }
-
-    /** Lets the player pick a daily by word length (4–8), showing today's status for each. */
-    private fun openDaily() {
-        ensureDailyPool {
-            val date = todayKey()
-            val lengths = (4..8).filter { dailyPool?.get(it)?.isNotEmpty() == true }
-            if (lengths.isEmpty()) { toast("No daily available"); return@ensureDailyPool }
-            val labels = lengths.map { len ->
-                val saved = prefs().getString("daily_${date}_$len", null)
-                val status = when {
-                    saved == null -> "play"
-                    saved.startsWith("W") -> "solved in ${saved.split("|").getOrNull(2) ?: "?"}"
-                    else -> "not solved"
-                }
-                "$len letters   ·   $status"
-            }.toTypedArray()
-            AlertDialog.Builder(this)
-                .setTitle("Daily puzzle")
-                .setItems(labels) { _, which ->
-                    val len = lengths[which]
-                    val pool = dailyPool?.get(len) ?: return@setItems
-                    val saved = prefs().getString("daily_${date}_$len", null)
-                    if (saved != null) showDailyResult(date, len, pool, saved)
-                    else startDaily(date, len, pool)
-                }
-                .show()
-        }
+        onReady()
     }
 
     private fun startDaily(date: String, len: Int, pool: List<String>) {
         dailyMode = true
         dailyLen = len
         dailyDateKey = date
-        dailyTargetWord = pool[dailyIndex(len, pool.size)]
+        dailyLangCode = currentLang.code
+        dailyTargetWord = pool[dailyIndex(len, pool.size, dailyLangCode)]
         dailyGuesses.clear()
         dailyStartMs = System.currentTimeMillis()
         target = dailyTargetWord
-        targetTyped = dailyTargetWord
+        targetTyped = WordLists.typeableForm(dailyTargetWord, currentLang)
         if (wordLen != len) { wordLen = len; populateBoard() }
         currentRow = 0
         currentCol = 0
         gameOver = false
         clearBoard()
+        updateLengthButtons()
         toast("Daily · $len letters")
     }
 
@@ -1275,12 +1411,14 @@ class MainActivity : Activity() {
         val record = listOf(
             if (won) "W" else "L", seconds, guessCount, dailyTargetWord, dailyGuesses.joinToString(",")
         ).joinToString("|")
-        prefs().edit().putString("daily_${dailyDateKey}_$dailyLen", record).apply()
+        prefs().edit().putString("daily_${dailyLangCode}_${dailyDateKey}_$dailyLen", record).apply()
+        updateLengthButtons() // reflect the fresh ✓ / – badge right away
+        recordResult(won, currentRow) // daily counts toward the current language's statistics
         if (won) promptSubmit(seconds, guessCount)
         else AlertDialog.Builder(this)
             .setTitle("Daily · $dailyLen letters")
             .setMessage("Not solved — the word was $dailyTargetWord.\nTime: ${fmtTime(seconds)}")
-            .setPositiveButton("Leaderboard") { _, _ -> showLeaderboard(dailyDateKey, dailyLen, null) }
+            .setPositiveButton("Leaderboard") { _, _ -> showLeaderboard(dailyLangCode, dailyDateKey, dailyLen, null) }
             .setNegativeButton("Close") { _, _ -> applyLength() }
             .show()
     }
@@ -1297,19 +1435,20 @@ class MainActivity : Activity() {
             .setTitle("Solved in $guessCount · ${fmtTime(seconds)}")
             .setMessage("Add your score to today's leaderboard?")
             .setView(input)
-            .setNegativeButton("Skip") { _, _ -> showLeaderboard(dailyDateKey, dailyLen, null) }
+            .setNegativeButton("Skip") { _, _ -> showLeaderboard(dailyLangCode, dailyDateKey, dailyLen, null) }
             .setPositiveButton("Submit") { _, _ ->
                 val name = Leaderboard.sanitizeName(input.text.toString())
                 prefs().edit().putString(PREF_NAME, name).apply()
+                val lang = dailyLangCode
                 val date = dailyDateKey
                 val len = dailyLen
                 showLoading(true)
                 Thread {
                     try {
-                        Leaderboard.submit(name, guessCount, seconds, date, len)
-                        ifAlive { showLoading(false); showLeaderboard(date, len, name) }
+                        Leaderboard.submit(name, guessCount, seconds, lang, date, len)
+                        ifAlive { showLoading(false); showLeaderboard(lang, date, len, name) }
                     } catch (e: Exception) {
-                        ifAlive { showLoading(false); toast("Submit failed: ${e.message}"); showLeaderboard(date, len, null) }
+                        ifAlive { showLoading(false); toast("Submit failed: ${e.message}"); showLeaderboard(lang, date, len, null) }
                     }
                 }.start()
             }
@@ -1322,21 +1461,24 @@ class MainActivity : Activity() {
         val won = parts.getOrNull(0) == "W"
         val seconds = parts.getOrNull(1)?.toIntOrNull() ?: 0
         val guessCount = parts.getOrNull(2)?.toIntOrNull() ?: 0
-        val targetWord = parts.getOrNull(3)?.takeIf { it.isNotEmpty() } ?: pool[dailyIndex(len, pool.size)]
+        val targetWord = parts.getOrNull(3)?.takeIf { it.isNotEmpty() }
+            ?: pool[dailyIndex(len, pool.size, currentLang.code)]
         val guesses = parts.getOrNull(4)?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
 
         dailyMode = true
         dailyLen = len
         dailyDateKey = date
+        dailyLangCode = currentLang.code
         dailyTargetWord = targetWord
         target = targetWord
-        targetTyped = targetWord
+        targetTyped = WordLists.typeableForm(targetWord, currentLang)
         if (wordLen != len) { wordLen = len; populateBoard() }
         currentRow = 0; currentCol = 0; gameOver = true
         clearBoard()
+        updateLengthButtons()
         for ((r, g) in guesses.withIndex()) {
             if (r >= ROWS || g.length != len) break
-            val states = evaluate(g, targetWord)
+            val states = evaluate(g, targetTyped)
             for (c in 0 until len) {
                 tiles[r][c].text = g[c].toString()
                 val color = when (states[c]) {
@@ -1347,6 +1489,13 @@ class MainActivity : Activity() {
                 tiles[r][c].background = tileDrawable(color, color)
                 describeTile(r, c, g[c], states[c])
             }
+            // Show its original spelling (with umlauts) and a "?" for look-up, as in a live game.
+            if (isKnownWord(g)) {
+                val display = if (g == targetTyped) target else (typedToOriginal[g] ?: g)
+                for (c in 0 until len) tiles[r][c].text = display[c].toString()
+                hintButtons[r].contentDescription = "Look up $display"
+                hintButtons[r].visibility = View.VISIBLE
+            }
         }
         AlertDialog.Builder(this)
             .setTitle("Daily · $len letters (played)")
@@ -1354,16 +1503,16 @@ class MainActivity : Activity() {
                 if (won) "You solved it in $guessCount · ${fmtTime(seconds)}."
                 else "Not solved — the word was $targetWord."
             )
-            .setPositiveButton("Leaderboard") { _, _ -> showLeaderboard(date, len, prefs().getString(PREF_NAME, null)) }
+            .setPositiveButton("Leaderboard") { _, _ -> showLeaderboard(dailyLangCode, date, len, prefs().getString(PREF_NAME, null)) }
             .setNegativeButton("Close") { _, _ -> applyLength() }
             .show()
     }
 
-    private fun showLeaderboard(date: String, len: Int, highlight: String?) {
+    private fun showLeaderboard(langCode: String, date: String, len: Int, highlight: String?) {
         showLoading(true)
         Thread {
             try {
-                val entries = Leaderboard.fetch(date, len)
+                val entries = Leaderboard.fetch(langCode, date, len)
                 ifAlive { showLoading(false); showLeaderboardDialog(len, entries, highlight) }
             } catch (e: Exception) {
                 ifAlive { showLoading(false); toast("Leaderboard unavailable: ${e.message}") }
@@ -1377,7 +1526,7 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(12), dp(20), dp(12))
         }
         box.addView(TextView(this).apply {
-            text = "Today · $len letters — fewest guesses, then fastest time"
+            text = "Today · ${currentLang.label} · $len letters — fewest guesses, then fastest time"
             setTextColor(HINT_COLOR)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, 0, 0, dp(6))
@@ -1454,6 +1603,7 @@ class MainActivity : Activity() {
         langButton.text = lang.badge
         prefs().edit().putString(PREF_LANG, lang.code).apply()
         populateKeys()
+        populateLengthRow() // the selectable range can differ per language
         setWordSource(words) // → applyLength() rebuilds the board and starts the game
     }
 
@@ -1489,6 +1639,7 @@ class MainActivity : Activity() {
         ensureAcceptList(currentLang) // load it in the background if not present yet
         populateBoard()
         startNewGame()
+        updateLengthButtons()
     }
 
     /** A guess counts as a real word if it's a target word or in the broader accept list. */
