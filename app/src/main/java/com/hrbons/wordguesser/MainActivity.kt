@@ -146,10 +146,9 @@ class MainActivity : Activity() {
 
         root.addView(buildHeader())
         root.addView(spacer(dp(8)))
-        root.addView(buildBoard())
+        root.addView(buildBoard())            // weighted: fills the space between header + keyboard
         root.addView(buildReveal())
         root.addView(buildSupport())
-        root.addView(spacer(0, weight = 1f)) // push keyboard to the bottom
         root.addView(buildMessage())          // transient messages sit just above the keyboard
         root.addView(buildKeyboard())
 
@@ -286,19 +285,36 @@ class MainActivity : Activity() {
     private fun buildBoard(): View {
         boardContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            // Fill the space between header and keyboard and centre the rows in it, so the
+            // board uses the screen height instead of leaving a large gap at the bottom.
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
         }
         populateBoard()
         return boardContainer
     }
 
-    /** Tile edge length (px) so [n] tiles + the side gutters fit the screen width. */
+    /** Keyboard key height (px). A little shorter when an extra language row is shown, so a
+     *  4-row keyboard still fits comfortably. */
+    private fun keyHeightPx(): Int {
+        val rows = KEY_ROWS.size + if (currentLang.extra.isNotEmpty()) 1 else 0
+        return if (rows >= 4) dp(52) else dp(60)
+    }
+
+    /** Tile edge length (px): as large as fits BOTH the screen width (given [n] columns) and
+     *  the height left between the header and the keyboard, so the board fills the screen. */
     private fun tileSizeFor(n: Int): Int {
-        val screen = resources.displayMetrics.widthPixels
-        val reserved = dp(12) * 2 + dp(30) * 2 // root padding + leading spacer + trailing "?"
-        val per = (screen - reserved) / n
-        return (per - dp(6)).coerceIn(dp(26), dp(56)) // minus per-tile L/R margins
+        val dm = resources.displayMetrics
+        // Width budget: root padding + leading spacer + trailing "?" + per-tile L/R margins.
+        val reservedW = dp(12) * 2 + dp(28) * 2
+        val byWidth = (dm.widthPixels - reservedW) / n - dp(8)
+        // Height budget: fit ROWS of tiles above the keyboard (and its optional extra row).
+        val keyRows = KEY_ROWS.size + if (currentLang.extra.isNotEmpty()) 1 else 0
+        val keyboardH = keyRows * (keyHeightPx() + dp(8))
+        val reservedH = dp(60) /*header*/ + dp(8) /*spacer*/ + keyboardH +
+            dp(12) * 2 /*root padding*/ + dp(30) /*message + slack*/
+        val byHeight = (dm.heightPixels - reservedH) / ROWS - dp(8)
+        return minOf(byWidth, byHeight).coerceIn(dp(30), dp(72))
     }
 
     /** (Re)builds the ROWS×[wordLen] grid, sizing tiles to fit the current word length. */
@@ -314,7 +330,7 @@ class MainActivity : Activity() {
             }
             // Leading spacer balances the trailing "?" so the tiles stay centered.
             rowLayout.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(30), size)
+                layoutParams = LinearLayout.LayoutParams(dp(28), size)
                 visibility = View.INVISIBLE
             })
             val rowTiles = Array(wordLen) { _ ->
@@ -327,7 +343,7 @@ class MainActivity : Activity() {
                     // Skipped by TalkBack until a submitted guess gives it a spoken label.
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     val lp = LinearLayout.LayoutParams(size, size)
-                    lp.setMargins(dp(3), dp(3), dp(3), dp(3))
+                    lp.setMargins(dp(4), dp(4), dp(4), dp(4))
                     layoutParams = lp
                 }
                 rowLayout.addView(tv)
@@ -340,8 +356,8 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 setTextColor(HINT_COLOR)
                 setTypeface(Typeface.DEFAULT_BOLD)
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, (size * 0.45f).coerceAtMost(dp(22).toFloat()))
-                layoutParams = LinearLayout.LayoutParams(dp(30), size)
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, (size * 0.45f).coerceAtMost(dp(24).toFloat()))
+                layoutParams = LinearLayout.LayoutParams(dp(28), size)
                 visibility = View.INVISIBLE
                 setOnClickListener { lookUpRow(r) }
             }
@@ -410,11 +426,11 @@ class MainActivity : Activity() {
         stateListAnimator = null
         setPadding(0, 0, 0, 0)
         val lp = if (weight == 0f) {
-            LinearLayout.LayoutParams(dp(64), dp(52)) // fixed-width for the extra row
+            LinearLayout.LayoutParams(dp(64), keyHeightPx()) // fixed-width for the extra row
         } else {
-            LinearLayout.LayoutParams(0, dp(52), weight)
+            LinearLayout.LayoutParams(0, keyHeightPx(), weight)
         }
-        lp.setMargins(dp(2), dp(3), dp(2), dp(3))
+        lp.setMargins(dp(3), dp(4), dp(3), dp(4))
         layoutParams = lp
         setOnClickListener { onLetter(ch) }
         keyButtons[ch] = this
@@ -430,8 +446,8 @@ class MainActivity : Activity() {
         background = keyDrawable(KEY_DEFAULT)
         stateListAnimator = null
         setPadding(0, 0, 0, 0)
-        val lp = LinearLayout.LayoutParams(0, dp(52), 1.5f)
-        lp.setMargins(dp(2), dp(3), dp(2), dp(3))
+        val lp = LinearLayout.LayoutParams(0, keyHeightPx(), 1.5f)
+        lp.setMargins(dp(3), dp(4), dp(3), dp(4))
         layoutParams = lp
         setOnClickListener { onClick() }
     }
