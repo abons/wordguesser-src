@@ -20,6 +20,8 @@ Captured with `adb shell screencap` after driving the app via on-screen-keyboard
 | 13-timed-bar | Timed mode: "⏱ 4:58 · 0 solved" + "Go!" pill |
 | 16-duel-your-turn | Duel start, "🤖 Duel · your turn" + "You start" pill |
 | 17-duel-comp-turn | Duel with 👤 player + 🤖 computer rows |
+| 17b-duel-online-turn | Online duel: "🌐 Duel · your turn" + 👤 you / 🧑 opponent rows |
+| 17c-duel-online-waiting | Online duel host waiting: share-code dialog ("ABCD") + "waiting for opponent" |
 | 18-modal-newgame | New game menu (2-line + chevron + dividers) |
 | 19-modal-language | Language picker (list style, "tap to get it" subtitle, recent on top) |
 | 20-modal-settings | Settings incl. High-contrast toggle + "How to play ›" |
