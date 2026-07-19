@@ -71,6 +71,39 @@ object Leaderboard {
     fun fetch(langCode: String, dateKey: String, len: Int): List<Entry> =
         rank(read("$BASE/$PUBLIC/pipe"), langCode, dateKey, len)
 
+    // --- Timed mode: a single global, weekly board (most words solved in one 5-minute run) ---
+    //
+    // Shares the same dreamlo board; timed entries are tagged "<NAME>_T_<weekKey>" so they never
+    // collide with a daily entry (which always ends in a numeric length). Score = words solved.
+
+    @Throws(IOException::class)
+    fun submitTimed(name: String, words: Int, weekKey: String) {
+        val entry = "${sanitizeName(name)}_T_$weekKey"
+        // dreamlo ranks by highest score by default; words is exactly that, so no seconds needed.
+        val body = read("$BASE/$PRIVATE/add/$entry/$words/0")
+        if (body.startsWith("ERROR")) throw IOException(body.trim())
+    }
+
+    /** This week's timed entries, ranked by most words solved. */
+    @Throws(IOException::class)
+    fun fetchTimed(weekKey: String): List<Entry> = rankTimed(read("$BASE/$PUBLIC/pipe"), weekKey)
+
+    /** Parses dreamlo pipe output, filters to the given week's timed entries and ranks by most
+     *  words solved (stored in the score field). */
+    internal fun rankTimed(pipeBody: String, weekKey: String): List<Entry> {
+        val suffix = "_T_$weekKey"
+        val out = ArrayList<Entry>()
+        for (line in pipeBody.lineSequence()) {
+            if (line.isBlank()) continue
+            val f = line.split("|")
+            if (f.size < 3 || !f[0].endsWith(suffix)) continue
+            val words = f[1].toIntOrNull() ?: continue
+            out.add(Entry(f[0].removeSuffix(suffix), words, f[2].toIntOrNull() ?: 0))
+        }
+        out.sortWith(compareByDescending { it.guesses })
+        return out
+    }
+
     /** Parses dreamlo pipe output (name|score|seconds|text|datetime|rank), filters to the given
      *  language + day + length (encoded in the name suffix) and ranks by fewest guesses then
      *  fastest time. */

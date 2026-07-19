@@ -34,4 +34,25 @@ object Wordle {
         }
         return result
     }
+
+    /**
+     * Words from [words] that are consistent with every clue a guesser has seen so far: a word
+     * `w` survives when, for each of [priorGuesses], scoring that guess against `w` would give the
+     * exact same colours it gave against the real [target]. Words already in [priorGuesses] are
+     * excluded so the guesser never repeats itself. All strings are assumed to be the same
+     * (typeable) length. Used by the duel NPC to pick a plausible next guess; kept pure and here
+     * so it can be unit-tested without Android.
+     */
+    fun consistentCandidates(
+        words: List<String>,
+        priorGuesses: List<String>,
+        target: String,
+    ): List<String> {
+        if (priorGuesses.isEmpty()) return words
+        val already = priorGuesses.toHashSet()
+        val clues = priorGuesses.map { it to evaluate(it, target) }
+        return words.filter { w ->
+            w !in already && clues.all { (g, states) -> evaluate(g, w).contentEquals(states) }
+        }
+    }
 }

@@ -75,7 +75,7 @@ object WordLists {
             source = "Built-in list", license = "—"
         ),
         Language(
-            "en", "EN", "English (large — dwyl)",
+            "en", "EN", "English (large)",
             "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
             minLen = 4, maxLen = 8,
             source = "dwyl/english-words", license = "Unlicense (public domain)",
@@ -83,7 +83,7 @@ object WordLists {
             licenseUrl = "https://unlicense.org/"
         ),
         Language(
-            "nl", "NL", "Nederlands (OpenTaal)",
+            "nl", "NL", "Nederlands",
             // Self-hosted, pre-filtered mirror of OpenTaal's approved base words (see
             // dist/wordlists/ — attribution + modifications in NL-README.md). Downloading
             // our own ~150 KB list avoids the 2.5 MB upstream file and third-party downtime.
