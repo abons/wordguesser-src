@@ -11,6 +11,9 @@ if (localPropsFile.exists()) {
     localPropsFile.withInputStream { localProperties.load(it) }
 }
 def geminiApiKey = localProperties.getProperty("GEMINI_API_KEY", "")
+// Firebase Realtime Database URL for the online duel (REST only, no client SDK). Empty = the
+// online-duel menu hides itself, so the feature is optional and nothing ships without a backend.
+def firebaseDbUrl = localProperties.getProperty("firebase.dbUrl", "")
 def releaseStoreFile = localProperties.getProperty("RELEASE_STORE_FILE", "")
 def hasReleaseSigning = releaseStoreFile != null && !releaseStoreFile.isEmpty()
 
@@ -43,9 +46,15 @@ android {
         versionCode 1
         versionName "1.0"
         buildConfigField "String", "GEMINI_KEY", "\"${geminiApiKey}\""
+        buildConfigField "String", "FIREBASE_DB_URL", "\"${firebaseDbUrl}\""
     }
 
     buildTypes {
+        debug {
+            // Distinct id so the debug/screenshot build installs alongside the signed release
+            // without a signature clash (and never touches the release app's stats).
+            applicationIdSuffix ".debug"
+        }
         release {
             // Lightweight release: strip unused code/resources.
             minifyEnabled true

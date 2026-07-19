@@ -16,6 +16,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -43,6 +45,7 @@ class MainActivity : Activity() {
     internal companion object {
         const val ROWS = 6
         const val DEFAULT_LEN = 5
+        const val TIMED_DURATION_MS = 5 * 60 * 1000L // timed-mode sprint length
 
         // Grammatical words that make up formulaic Dutch "form-of" glosses, e.g.
         // "tweede persoon enkelvoud tegenwoordige tijd van rollen" or "verbogen vorm
@@ -109,8 +112,15 @@ class MainActivity : Activity() {
         const val CORRECT = 0xFF538D4E.toInt()
         const val PRESENT = 0xFFB59F3B.toInt()
         const val ABSENT = 0xFF3A3A3C.toInt()
+        // High-contrast (colour-blind) palette — Wordle's own accessible orange/blue. Swapped in
+        // for CORRECT/PRESENT tile & key fills when the setting is on (see correctColor/presentColor).
+        const val CORRECT_HC = 0xFFF5793A.toInt() // orange
+        const val PRESENT_HC = 0xFF85C0F9.toInt() // blue
+        const val DIVIDER = 0xFF3A3A3C.toInt()    // thin separators in option-list dialogs
         const val KEY_DEFAULT = 0xFF818384.toInt()
         const val HINT_COLOR = 0xFF9AA0A6.toInt()
+        const val LINK_COLOR = 0xFF8AB4F8.toInt() // tappable/accent text in dialogs (e.g. "↓" download)
+        const val SHEET_BG = 0xFF2A2A2C.toInt()   // surface behind every bottom-sheet dialog
         const val DAILY = 0xFF4E7AC7.toInt() // active length in daily mode (gold = normal mode)
         const val DAILY_WON = 0xFF3DDC84.toInt()  // ✓ badge — today's daily solved
         const val DAILY_LOST = 0xFFFF5A5A.toInt() // – badge — today's daily played but not solved
@@ -131,15 +141,21 @@ class MainActivity : Activity() {
         const val PREF_STRICT = "strict"
         const val PREF_LEN = "wordlen"
         const val PREF_HARD = "hard"
+        const val PREF_HIGHCONTRAST = "highcontrast"
         const val PREF_NAME = "player_name"
         const val PREF_SUPPORT_LAST = "support_last"
+        const val PREF_CHIP_HINT_SEEN = "chip_hint_seen"
+        const val PREF_HOWTO_SEEN = "howto_seen"
+        const val PREF_RECENT_LANGS = "recent_langs"
         const val GEMINI_APP = "com.google.android.apps.bard"
         const val KOFI_URL = "https://ko-fi.com/hrbons"
     }
 
     private lateinit var tiles: Array<Array<TextView>>
+    private lateinit var tileState: Array<IntArray>   // last evaluated state per tile (-1 = uncoloured)
     private lateinit var hintButtons: Array<TextView>
     private lateinit var countViews: Array<TextView> // hard-mode "in word / in place" line per row
+    private lateinit var rowIcons: Array<TextView>   // duel: who played the row (👤/🤖), leading the row
     private val keyButtons = HashMap<Char, Button>()
     private val keyState = HashMap<Char, Int>()
 
@@ -156,7 +172,6 @@ class MainActivity : Activity() {
     private lateinit var revealWord: TextView
     private lateinit var revealHint: TextView
     private lateinit var messageView: TextView     // transient message pill, above the keyboard
-    private lateinit var supportRow: TextView      // subtle Ko-fi nudge after a win
     private val hideMessage = Runnable {
         if (::messageView.isInitialized) messageView.visibility = View.GONE
     }
@@ -178,6 +193,7 @@ class MainActivity : Activity() {
     private var loadingDialog: AlertDialog? = null
     private var strictMode = false
     private var hardMode = false
+    private var highContrast = false
 
     // Daily puzzle state. The daily is per language: the word is global for everyone playing the
     // same language on the same UTC day + length (built from that language's answer pool).
@@ -191,12 +207,234 @@ class MainActivity : Activity() {
     private var dailyPool: Map<Int, List<String>>? = null
     private var dailyPoolLang: String? = null   // which language dailyPool was built for
 
+    // Game mode chosen from the "New" menu. DAILY is entered separately via the length row and
+    // tracked by [dailyMode]; the two are mutually exclusive (entering one leaves the other).
+    private enum class Mode { NORMAL, TIMED, DUEL }
+    private var gameMode = Mode.NORMAL
+    private lateinit var modeBar: TextView   // persistent status line (timer / turn), hidden in NORMAL
+
+    // Timed mode: solve as many words as possible before the clock runs out; score → weekly board.
+    private var timedEndMs = 0L
+    private var timedScore = 0
+    private var timedRunning = false
+    private val timedTick = object : Runnable {
+        override fun run() {
+            if (!timedRunning) return
+            if (System.currentTimeMillis() >= timedEndMs) { finishTimed(); return }
+            updateModeBar()
+            modeBar.postDelayed(this, 500)
+        }
+    }
+
+    // Duel mode: player and NPC alternate guesses at one shared hidden word; first to solve wins.
+    private var duelPlayerTurn = true
+    private val duelGuesses = ArrayList<String>()   // every typed guess so far (both players)
+
+    // Online duel (vs another human over Firebase — see [Duel]). Reuses [Mode.DUEL]: the opponent
+    // simply replaces the NPC. Move index == board row (each move advances one row).
+    private var duelOnline = false
+    private var duelIsHost = false
+    private var duelMyIndex = 0          // 0 = host, 1 = guest
+    private var duelRoomCode = ""
+    private var duelStarter = 0          // who guesses first this round (0 = host, 1 = guest)
+    private var duelRound = 0            // rematch counter (0 = first game); host owns it
+    private var duelWaiting = false      // host, before the guest has joined: block input
+    private var duelPollGen = 0          // bump to cancel any in-flight poll loop
+    private var waitingDialog: AlertDialog? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+        hideSystemBars()
         strictMode = prefs().getBoolean(PREF_STRICT, false)
         hardMode = prefs().getBoolean(PREF_HARD, false)
+        highContrast = prefs().getBoolean(PREF_HIGHCONTRAST, false)
         initLanguage()
+        // Debug-only screenshot harness: `am start … --es shot <name>` drops the app straight into
+        // a named state so docs/screenshots can be regenerated by a script instead of by hand.
+        val shot = if (BuildConfig.DEBUG) intent?.getStringExtra("shot") else null
+        if (shot != null) applyShot(shot) else maybeShowHowToPlay()
+    }
+
+    override fun onDestroy() {
+        duelPollGen++   // stop any in-flight online-duel poll loop
+        super.onDestroy()
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Screenshot harness (debug builds only) — see update-screenshots.ps1
+    // ---------------------------------------------------------------------------------
+
+    /** Types [word] into the current row and submits it, reusing the real input path so the
+     *  resulting tiles/colours are exactly what a player would see. */
+    private fun shotGuess(word: String) {
+        for (ch in word) onLetter(ch.uppercaseChar())
+        onEnter()
+    }
+
+    /** Pins a deterministic answer so a scenario's guesses always score the same colours. */
+    private fun shotTarget(word: String) {
+        target = word.uppercase()
+        targetTyped = WordLists.typeableForm(target, currentLang)
+    }
+
+    /** Renders [guesses] into consecutive rows using the real evaluation path, then parks the
+     *  cursor past them (optionally ending the game). */
+    private fun shotBoard(target: String, vararg guesses: String, over: Boolean = false) {
+        shotTarget(target)
+        clearBoard()
+        guesses.forEachIndexed { r, g -> renderGuessRow(r, g.uppercase()) }
+        currentRow = guesses.size
+        currentCol = 0
+        gameOver = over
+    }
+
+    /** Writes a finished daily result to prefs so its ✓ / – length-row badge shows. */
+    private fun shotDailyBadge(len: Int, won: Boolean) {
+        val rec = "${if (won) "W" else "L"}|83|4|PLANT|train,plank"
+        prefs().edit().putString("daily_${currentLang.code}_${todayKey()}_$len", rec).apply()
+    }
+
+    /** Cosmetically shows another language's keyboard + length row at [len] with an empty board
+     *  (the built-in English list is fixed at 5 letters, so board-resize / extra-key shots borrow
+     *  a 4-8 language's chrome without downloading its word list — the tiles are empty anyway).
+     *  Not persisted: every shot force-restarts and reloads the built-in language. */
+    private fun shotLangChrome(code: String, len: Int) {
+        currentLang = WordLists.LANGUAGES.first { it.code == code }
+        langButton.text = currentLang.badge
+        populateKeys(); populateLengthRow()
+        rebuildForLength(len); updateLengthButtons()
+    }
+
+    /** Drives the app into the named screenshot state. Each name maps 1:1 to a docs/screenshots
+     *  file. Board-only states just leave the UI in place; modal states open their dialog.
+     *  Network-backed dialogs (leaderboards, definitions) are fed stub data so shots stay offline
+     *  and deterministic. */
+    private fun applyShot(name: String) {
+        // Stub leaderboard rows so the boards render without a dreamlo round-trip.
+        val timedRows = listOf(
+            Leaderboard.Entry("Robin", 14, 0), Leaderboard.Entry("You", 11, 0),
+            Leaderboard.Entry("Sam", 9, 0), Leaderboard.Entry("Alex", 7, 0),
+        )
+        val dailyRows = listOf(
+            Leaderboard.Entry("Robin", 3, 41), Leaderboard.Entry("You", 4, 83),
+            Leaderboard.Entry("Sam", 4, 126), Leaderboard.Entry("Alex", 5, 210),
+        )
+        // A fabricated daily badge from an earlier shot must not bleed into this one.
+        for (k in prefs().all.keys.toList()) if (k.startsWith("daily_")) prefs().edit().remove(k).apply()
+        updateLengthButtons()
+        when (name) {
+            "empty-board" -> shotTarget("PLANT")
+            "midgame" -> shotBoard("PLANT", "TRAIN", "PLANK")
+            "win" -> { shotBoard("PLANT", "TRAIN", "PLANK", "PLANT", over = true); toast(winMessage(2)) }
+            "loss-reveal" -> {
+                shotBoard("PLANT", "TRAIN", "CHOIR", "MOUSE", "BUDGE", "FLECK", "WRYLY", over = true)
+                showReveal(target)
+            }
+            "hard-mode" -> { hardMode = true; populateBoard(); shotBoard("PLANT", "TRAIN", "PLANK") }
+            "highcontrast" -> { highContrast = true; shotBoard("PLANT", "TRAIN", "PLANK") }
+            "strict-reject" -> { for (ch in "ZEBRA") onLetter(ch); toast("Not in word list") }
+            "length-4" -> shotLangChrome("en", 4)
+            "length-8" -> shotLangChrome("en", 8)
+            "length-8-extrakeys" -> shotLangChrome("de", 8) // "de" adds the ß key row
+            "daily-fresh" -> {
+                dailyMode = true; clearBoard(); shotTarget("PLANT")
+                updateLengthButtons(); toast("Daily · 5 letters")
+            }
+            "daily-won-badge" -> { shotDailyBadge(5, won = true); updateLengthButtons() }
+            "daily-lost-badge" -> { shotDailyBadge(5, won = false); updateLengthButtons() }
+            "timed-bar" -> {
+                gameMode = Mode.TIMED; timedScore = 4
+                timedEndMs = System.currentTimeMillis() + 167_000L
+                updateModeBar(); shotBoard("PLANT", "TRAIN")
+            }
+            "timed-solved" -> {
+                gameMode = Mode.TIMED; timedScore = 5
+                timedEndMs = System.currentTimeMillis() + 143_000L
+                updateModeBar(); shotBoard("PLANT", "PLANT", over = true); toast(winMessage(0))
+            }
+            "duel-your-turn" -> {
+                gameMode = Mode.DUEL; duelPlayerTurn = true
+                shotTarget("PLANT"); clearBoard()
+                renderGuessRow(0, "CRANE", forceColor = true); labelDuelRow(0, player = false)
+                currentRow = 1; updateModeBar()
+            }
+            "duel-comp-turn" -> {
+                gameMode = Mode.DUEL; duelPlayerTurn = false
+                shotTarget("PLANT"); clearBoard()
+                renderGuessRow(0, "SLATE"); labelDuelRow(0, player = true)
+                currentRow = 1; updateModeBar()
+            }
+            "duel-online-turn" -> {
+                gameMode = Mode.DUEL; duelOnline = true; duelPlayerTurn = true
+                shotTarget("PLANT"); clearBoard()
+                renderGuessRow(0, "SLATE", forceColor = true); labelDuelRow(0, player = true)
+                renderGuessRow(1, "CRANE", forceColor = true); labelDuelRow(1, player = false)
+                currentRow = 2; updateModeBar()
+            }
+            "duel-online-waiting" -> {
+                gameMode = Mode.DUEL; duelOnline = true; duelIsHost = true; duelWaiting = true
+                duelRoomCode = "ABCD"
+                shotTarget("PLANT"); clearBoard(); updateModeBar()
+                showWaitingDialog("ABCD")
+            }
+            "modal-newgame" -> showNewGameMenu()
+            "modal-language" -> showLanguagePicker()
+            "modal-settings" -> showSettings()
+            "modal-stats" -> showStats()
+            "modal-stats-reset" -> confirmResetStats()
+            "modal-sources" -> showSources()
+            "modal-howto" -> showHowToPlay()
+            "modal-loading" -> showLoading(true)
+            "modal-lookup" -> lookUpMenu("plant")
+            "modal-definition" -> {
+                val nl = WordLists.LANGUAGES.first { it.code == "nl" }
+                presentDefinition("hond", nl, mapOf("hond" to "een zoogdier uit de familie van de hondachtigen, vaak als huisdier gehouden"))
+            }
+            "modal-timeup" -> { gameMode = Mode.TIMED; timedScore = 7; finishTimed() }
+            "modal-timed-submit" -> promptSubmitTimed(7)
+            "modal-timed-board" -> showTimedLeaderboardDialog(timedRows, "You")
+            "modal-duel-result" -> { shotTarget("PLANT"); finishDuel("You win! 🎉") }
+            "modal-daily-submit" -> {
+                dailyLangCode = currentLang.code; dailyDateKey = todayKey(); dailyLen = 5
+                promptSubmit(83, 4)
+            }
+            "modal-daily-failed" -> showDailyResult(todayKey(), 5, emptyList(), "L|126|6|PLANT|train,choir,mouse,budge,fleck,wryly")
+            "modal-daily-played" -> showDailyResult(todayKey(), 5, emptyList(), "W|83|4|PLANT|train,plank,plans,plant")
+            "modal-daily-board" -> showLeaderboardDialog(5, dailyRows, "You")
+            else -> toast("Unknown shot: $name")
+        }
+    }
+
+    /** Re-hide the system bars when the window regains focus (e.g. after a dialog). */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    /**
+     * Immersive fullscreen: hide the status + navigation bars while the app is open.
+     * Bars reappear temporarily on a swipe from the edge, then auto-hide again.
+     */
+    private fun hideSystemBars() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                )
+        }
     }
 
     // ---------------------------------------------------------------------------------
@@ -213,10 +451,10 @@ class MainActivity : Activity() {
 
         root.addView(buildHeader())
         root.addView(buildLengthRow())        // one button per word length, under the header
+        root.addView(buildModeBar())          // timer / turn status for timed & duel (hidden otherwise)
         root.addView(spacer(dp(8)))
         root.addView(buildBoard())            // weighted: fills the space between header + keyboard
         root.addView(buildReveal())
-        root.addView(buildSupport())
         root.addView(buildMessage())          // transient messages sit just above the keyboard
         root.addView(buildKeyboard())
 
@@ -242,6 +480,21 @@ class MainActivity : Activity() {
             layoutParams = lp
         }
         return messageView
+    }
+
+    /** Persistent status line for timed & duel modes (countdown + score, or whose turn it is).
+     *  Hidden in normal/daily play. */
+    private fun buildModeBar(): View {
+        modeBar = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(TEXT)
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(6), dp(12), dp(2))
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        }
+        return modeBar
     }
 
     /** Row shown under the board after a loss: the missed word + a "?" to look it up. */
@@ -279,27 +532,75 @@ class MainActivity : Activity() {
         revealRow.visibility = View.VISIBLE
     }
 
-    /** Subtle, tappable Ko-fi line shown under the board after a win. */
-    private fun buildSupport(): View {
-        supportRow = TextView(this).apply {
-            text = "Enjoying it?  ☕ Support the dev ›"
-            setTextColor(0xFFFF7A78.toInt()) // soft Ko-fi red
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-            setPadding(dp(12), dp(12), dp(12), 0)
-            setOnClickListener { openInBrowser(KOFI_URL) }
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
-        }
-        return supportRow
+    /** Shows a friendly win dialog with a Ko-fi nudge — at most once per (local) day. Used instead
+     *  of an always-on coloured row over the board, so gameplay is never covered. Falls back to a
+     *  plain toast on days the nudge has already been shown. */
+    private fun maybeShowWinSupport(title: String, word: String) {
+        val today = java.text.SimpleDateFormat("yyyyMMdd", Locale.US).format(java.util.Date())
+        if (prefs().getString(PREF_SUPPORT_LAST, "") == today) { toast(title); return }
+        prefs().edit().putString(PREF_SUPPORT_LAST, today).apply()
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage("The word was $word.\n\nEnjoying Word Guesser?")
+            .setPositiveButton("Close", null)
+            .setNeutralButton("☕ Support") { _, _ -> openInBrowser(KOFI_URL) }
+            .showSheet()
     }
 
-    /** Shows the subtle support nudge after a win — at most once per (local) day. */
-    private fun showSupportPrompt() {
-        val today = java.text.SimpleDateFormat("yyyyMMdd", Locale.US).format(java.util.Date())
-        if (prefs().getString(PREF_SUPPORT_LAST, "") == today) return
-        prefs().edit().putString(PREF_SUPPORT_LAST, today).apply()
-        supportRow.visibility = View.VISIBLE
+    /** Shows the how-to-play overlay the very first time the app is opened. */
+    private fun maybeShowHowToPlay() {
+        if (prefs().getBoolean(PREF_HOWTO_SEEN, false)) return
+        prefs().edit().putBoolean(PREF_HOWTO_SEEN, true).apply()
+        window.decorView.post { showHowToPlay() }
+    }
+
+    /** Concise rules + a colour legend. Reachable any time from Settings › How to play. */
+    private fun showHowToPlay() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(12), dp(24), dp(8))
+        }
+        fun para(text: String, topDp: Int = 12) = TextView(this).apply {
+            this.text = text
+            setTextColor(TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setPadding(0, dp(topDp), 0, 0)
+        }
+        // A small coloured example tile followed by an explanation line.
+        fun legend(color: Int, letter: String, meaning: String) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = letter
+                setTextColor(TEXT)
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                gravity = Gravity.CENTER
+                background = tileDrawable(color, color)
+                layoutParams = LinearLayout.LayoutParams(dp(34), dp(34))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = meaning
+                setTextColor(TEXT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setPadding(dp(14), 0, 0, 0)
+            })
+        }
+        box.addView(para("Guess the hidden word in 6 tries. Each guess must be a real word of the " +
+            "right length.", topDp = 0))
+        box.addView(para("After each guess the tiles show how close you were:"))
+        box.addView(legend(correctColor(), "A", "right letter, right spot"))
+        box.addView(legend(presentColor(), "B", "in the word, wrong spot"))
+        box.addView(legend(ABSENT, "C", "not in the word"))
+        box.addView(para("Tap the ? next to a finished row to look up that word."))
+        box.addView(para("The number row picks word length. Blue = today's daily puzzle, " +
+            "gold = free play."))
+        AlertDialog.Builder(this)
+            .setTitle("How to play")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Got it", null)
+            .showSheet()
     }
 
     private fun buildHeader(): View {
@@ -311,11 +612,11 @@ class MainActivity : Activity() {
         langButton = smallButton(currentLang.badge) { showLanguagePicker() }
         langButton.contentDescription = "Change language"
         val title = TextView(this).apply {
-            text = "WORD GUESSER"
+            text = "Word Guesser"
             setTextColor(TEXT)
             setTypeface(Typeface.DEFAULT_BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            letterSpacing = 0.02f
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            letterSpacing = 0.01f
             gravity = Gravity.CENTER
             maxLines = 1
             layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
@@ -324,9 +625,8 @@ class MainActivity : Activity() {
         // makes way for a direct Statistics button (daily results count toward these stats too).
         val stats = smallButton("📊") { showStats() }.apply { contentDescription = "Statistics" }
         val settings = smallButton("⚙") { showSettings() }.apply { contentDescription = "Settings" }
-        val newGame = smallButton("New") {
-            if (dailyMode) applyLength() else startNewGame() // restore the normal length after a daily
-        }.apply { contentDescription = "New game" }
+        val newGame = smallButton("New") { showNewGameMenu() }
+            .apply { contentDescription = "New game" }
         header.addView(langButton)
         header.addView(title)
         header.addView(stats)
@@ -345,8 +645,10 @@ class MainActivity : Activity() {
         stateListAnimator = null
         minWidth = dp(52)
         minimumWidth = dp(52)
-        setPadding(dp(12), dp(8), dp(12), dp(8))
-        val lp = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        // Fixed height keeps the emoji buttons (📊/⚙) the same size as the text buttons, so the
+        // header reads as one even row instead of a ragged one.
+        setPadding(dp(12), 0, dp(12), 0)
+        val lp = LinearLayout.LayoutParams(WRAP_CONTENT, dp(46))
         lp.setMargins(dp(2), 0, dp(2), 0)
         layoutParams = lp
         setOnClickListener { onClick() }
@@ -360,7 +662,9 @@ class MainActivity : Activity() {
         lengthRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = dp(6) // breathing room under the header so the rows don't touch
+            }
         }
         populateLengthRow()
         return lengthRow
@@ -447,8 +751,17 @@ class MainActivity : Activity() {
         }
     }
 
+    /** First time the length row is used, explain what its two active tints mean. Posted with a
+     *  small delay so it lands *after* any toast the tap itself fires (and thus stays on screen). */
+    private fun maybeShowChipHint() {
+        if (prefs().getBoolean(PREF_CHIP_HINT_SEEN, false)) return
+        prefs().edit().putBoolean(PREF_CHIP_HINT_SEEN, true).apply()
+        messageView.postDelayed({ toast("Blue = today's daily · gold = free play") }, 900)
+    }
+
     /** Handles a tap on the length-[len] button (see [buildLengthRow]). */
     private fun onLengthTap(len: Int) {
+        maybeShowChipHint()
         // Tapping the length we're already on toggles it between daily and normal.
         if (len == wordLen) {
             if (dailyMode) startNormalAt(len) else openDailyFor(len)
@@ -472,7 +785,7 @@ class MainActivity : Activity() {
     /** Enters a normal game at [len]: continues the current one if we're already playing that
      *  length outside a daily, otherwise starts a fresh game at that length. */
     private fun startNormalAt(len: Int) {
-        if (!dailyMode && wordLen == len && !gameOver) {
+        if (gameMode == Mode.NORMAL && !dailyMode && wordLen == len && !gameOver) {
             toast("$len letters"); return // already playing this length — keep going
         }
         prefs().edit().putInt(PREF_LEN, len).apply()
@@ -515,8 +828,11 @@ class MainActivity : Activity() {
         val dm = resources.displayMetrics
         val keyRows = KEY_ROWS.size + if (currentLang.extra.isNotEmpty()) 1 else 0
         val keyboardH = keyRows * (keyHeightPx() + dp(8))
+        // Hard mode shows a count line ("N in word · M in right place") under every row; reserve
+        // its height for all ROWS so a full board doesn't overflow off the bottom.
+        val hardExtra = if (hardMode && gameMode != Mode.DUEL) dp(22) * ROWS else 0
         val reservedH = dp(60) /*header*/ + dp(44) /*length row*/ + dp(8) /*spacer*/ + keyboardH +
-            dp(12) * 2 /*root padding*/ + dp(30) /*message + slack*/
+            dp(12) * 2 /*root padding*/ + dp(30) /*message + slack*/ + hardExtra
         val byHeight = (dm.heightPixels - reservedH) / ROWS - dp(8)
         return byHeight.coerceIn(dp(30), dp(72))
     }
@@ -541,16 +857,22 @@ class MainActivity : Activity() {
         val textPx = minOf(w, h).toFloat()
         val hints = arrayOfNulls<TextView>(ROWS)
         val counts = arrayOfNulls<TextView>(ROWS)
+        val icons = arrayOfNulls<TextView>(ROWS)
         tiles = Array(ROWS) { r ->
             val rowLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_HORIZONTAL
             }
-            // Leading spacer balances the trailing "?" so the tiles stay centered.
-            rowLayout.addView(View(this).apply {
+            // Leading marker balances the trailing "?" so the tiles stay centered; in duel mode it
+            // shows who played the row (👤/🤖) instead of an empty spacer.
+            val icon = TextView(this).apply {
+                gravity = Gravity.CENTER
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, (textPx * 0.45f).coerceAtMost(dp(24).toFloat()))
                 layoutParams = LinearLayout.LayoutParams(dp(20), h)
                 visibility = View.INVISIBLE
-            })
+            }
+            icons[r] = icon
+            rowLayout.addView(icon)
             val rowTiles = Array(wordLen) { _ ->
                 val tv = TextView(this).apply {
                     gravity = Gravity.CENTER
@@ -596,6 +918,8 @@ class MainActivity : Activity() {
         }
         hintButtons = hints.requireNoNulls()
         countViews = counts.requireNoNulls()
+        rowIcons = icons.requireNoNulls()
+        tileState = Array(ROWS) { IntArray(wordLen) { -1 } }
     }
 
     private fun buildKeyboard(): View {
@@ -675,7 +999,10 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------------------------
 
     private fun startNewGame() {
-        dailyMode = false // any normal game leaves the daily
+        stopTimedDuel()   // any normal game leaves timed/duel
+        gameMode = Mode.NORMAL
+        duelOnline = false
+        dailyMode = false // ...and leaves the daily
         if (answers.isEmpty()) return
         target = answers[Random.nextInt(answers.size)]
         targetTyped = WordLists.typeableForm(target, currentLang)
@@ -685,27 +1012,892 @@ class MainActivity : Activity() {
         clearBoard()
     }
 
+    /** Stops any running timed clock and hides the mode status bar (shared teardown for the
+     *  special modes). Safe to call even when no special mode is active. */
+    private fun stopTimedDuel() {
+        timedRunning = false
+        stopOnlineDuel()
+        if (::modeBar.isInitialized) {
+            modeBar.removeCallbacks(timedTick)
+            modeBar.visibility = View.GONE
+        }
+    }
+
+    /** Cancels any in-flight online-duel poll loop and dismisses the "waiting" dialog. Leaves
+     *  [duelOnline] alone — each entry point (startNewGame/startTimed/startDuel/beginOnlineDuel)
+     *  sets that itself, so the flag survives this shared teardown. */
+    private fun stopOnlineDuel() {
+        duelPollGen++
+        duelWaiting = false
+        waitingDialog?.dismiss()
+        waitingDialog = null
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Game-mode menu (the "New" button)
+    // ---------------------------------------------------------------------------------
+
+    /** One tappable row in an [showOptionList] dialog. The trailing glyph defaults to a
+     *  navigational "›"; callers can override it (e.g. "↓" to signal a download) and tint it. */
+    private data class OptionRow(
+        val title: String,
+        val subtitle: String? = null,
+        val trailing: String = "›",
+        val trailingColor: Int? = null,
+        val action: () -> Unit,
+    )
+
+    /** A dark, tappable option list with a bold title, optional subtitle, a trailing glyph and thin
+     *  dividers — used instead of a bare AlertDialog.setItems() so options read as tappable.
+     *  An optional [caption] renders a small hint line under the title (e.g. a glyph legend). */
+    private fun showOptionList(title: String, rows: List<OptionRow>, caption: String? = null) {
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        caption?.let { cap ->
+            list.addView(TextView(this).apply {
+                text = cap
+                setTextColor(HINT_COLOR)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setPadding(dp(24), 0, dp(24), dp(8))
+            })
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(ScrollView(this).apply { addView(list) })
+            .create()
+        rows.forEachIndexed { i, row ->
+            if (i > 0) list.addView(View(this).apply {
+                setBackgroundColor(DIVIDER)
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, Math.max(1, dp(1))).apply {
+                    setMargins(dp(20), 0, dp(20), 0)
+                }
+            })
+            val rowView = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(24), dp(14), dp(18), dp(14))
+                isClickable = true
+                isFocusable = true
+                background = selectableItemBg()
+                setOnClickListener { dialog.dismiss(); row.action() }
+            }
+            val texts = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            }
+            texts.addView(TextView(this).apply {
+                text = row.title
+                setTextColor(TEXT)
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            })
+            row.subtitle?.let { sub ->
+                texts.addView(TextView(this).apply {
+                    text = sub
+                    setTextColor(HINT_COLOR)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setPadding(0, dp(2), 0, 0)
+                })
+            }
+            rowView.addView(texts)
+            rowView.addView(TextView(this).apply {
+                text = row.trailing
+                setTextColor(row.trailingColor ?: HINT_COLOR)
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            })
+            list.addView(rowView)
+        }
+        dialog.show()
+        styleAsBottomSheet(dialog)
+    }
+
+    /** Rounded-top surface behind every dialog so they all read as one bottom-sheet style. */
+    private fun sheetBackground(): android.graphics.drawable.Drawable {
+        val r = dp(20).toFloat()
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(SHEET_BG)
+            // top-left, top-right rounded; bottom corners square (sheet sits on the screen edge)
+            cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+        }
+    }
+
+    /** Anchors [dialog] to the bottom, full width, with a rounded-top sheet background and a
+     *  slide-up animation — the single consistent modal style across the app. */
+    private fun styleAsBottomSheet(dialog: android.app.Dialog) {
+        val w = dialog.window ?: return
+        w.setBackgroundDrawable(sheetBackground())
+        w.setWindowAnimations(android.R.style.Animation_InputMethod) // built-in slide-from-bottom
+        w.attributes = w.attributes.apply {
+            width = MATCH_PARENT
+            gravity = Gravity.BOTTOM
+        }
+    }
+
+    /** Builds, shows and bottom-sheet-styles an [AlertDialog] in one step. Use instead of
+     *  [AlertDialog.Builder.show] so message/content dialogs match the option-list sheets. */
+    private fun AlertDialog.Builder.showSheet(): AlertDialog {
+        val d = show()
+        styleAsBottomSheet(d)
+        return d
+    }
+
+    /** The framework's ripple/highlight background for a tappable list row. */
+    private fun selectableItemBg(): android.graphics.drawable.Drawable? {
+        val ta = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+        val d = ta.getDrawable(0)
+        ta.recycle()
+        return d
+    }
+
+    private fun showNewGameMenu() {
+        val rows = arrayListOf(
+            OptionRow("Normal", "Guess the word in 6 tries") { startNewGame() },
+            OptionRow("Timed", "5-minute sprint — solve as many as you can") { startTimed() },
+            OptionRow("Duel vs computer", "Race the computer to the word") { startDuel() },
+        )
+        // Online duel only appears when a Firebase backend is configured (see [Duel.enabled]).
+        if (Duel.enabled()) rows.add(
+            OptionRow("Duel vs player", "Online turn-by-turn duel over a code") { showOnlineDuelMenu() }
+        )
+        showOptionList("New game", rows)
+    }
+
+    /** Updates the persistent status line for the active special mode. */
+    private fun updateModeBar() {
+        if (!::modeBar.isInitialized) return
+        when (gameMode) {
+            Mode.TIMED -> {
+                val left = ((timedEndMs - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
+                modeBar.text = "⏱ ${fmtTime(left)}   ·   $timedScore solved"
+                modeBar.setTextColor(if (left <= 30) DAILY_LOST else TEXT)
+                modeBar.visibility = View.VISIBLE
+            }
+            Mode.DUEL -> {
+                modeBar.text = when {
+                    duelOnline && duelWaiting -> "🌐 Duel  ·  waiting for opponent  ($duelRoomCode)"
+                    duelOnline -> if (duelPlayerTurn) "🌐 Duel  ·  your turn" else "🌐 Duel  ·  opponent…"
+                    else -> if (duelPlayerTurn) "🤖 Duel  ·  your turn" else "🤖 Duel  ·  computer…"
+                }
+                modeBar.setTextColor(TEXT)
+                modeBar.visibility = View.VISIBLE
+            }
+            Mode.NORMAL -> modeBar.visibility = View.GONE
+        }
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Timed mode — 5-minute sprint, most words solved → weekly global leaderboard
+    // ---------------------------------------------------------------------------------
+
+    private fun startTimed() {
+        if (answers.isEmpty()) { toast("Word list not loaded yet"); return }
+        stopTimedDuel()
+        gameMode = Mode.TIMED
+        duelOnline = false
+        dailyMode = false
+        timedScore = 0
+        timedEndMs = System.currentTimeMillis() + TIMED_DURATION_MS
+        timedRunning = true
+        nextTimedTarget()
+        updateModeBar()
+        modeBar.removeCallbacks(timedTick)
+        modeBar.post(timedTick)
+        toast("Go! Solve as many as you can")
+    }
+
+    /** Picks a fresh word and clears the board for the next timed round. */
+    private fun nextTimedTarget() {
+        target = answers[Random.nextInt(answers.size)]
+        targetTyped = WordLists.typeableForm(target, currentLang)
+        currentRow = 0
+        currentCol = 0
+        gameOver = false
+        clearBoard()
+    }
+
+    /** Called when the current timed word is finished (solved or out of guesses): briefly shows
+     *  the outcome, then moves on — unless the clock has run out. */
+    private fun advanceTimed(solved: String?) {
+        if (solved != null) { timedScore++; toast(winMessage(currentRow)) }
+        else toast("Was $target")
+        updateModeBar()
+        modeBar.postDelayed({
+            if (gameMode != Mode.TIMED || !timedRunning) return@postDelayed
+            if (System.currentTimeMillis() >= timedEndMs) finishTimed()
+            else { nextTimedTarget(); updateModeBar() }
+        }, 800)
+    }
+
+    private fun finishTimed() {
+        if (gameMode != Mode.TIMED) return
+        timedRunning = false
+        modeBar.removeCallbacks(timedTick)
+        gameOver = true
+        val score = timedScore
+        AlertDialog.Builder(this)
+            .setTitle("Time's up!")
+            .setMessage("You solved $score ${if (score == 1) "word" else "words"} in 5 minutes.")
+            .setPositiveButton("Leaderboard") { _, _ -> promptSubmitTimed(score) }
+            .setNegativeButton("Done") { _, _ -> startNewGame() }
+            .showSheet()
+    }
+
+    private fun promptSubmitTimed(score: Int) {
+        if (score <= 0) { showTimedLeaderboard(null); return }
+        val input = EditText(this).apply {
+            setText(prefs().getString(PREF_NAME, ""))
+            hint = "Name (optional)"
+            setSingleLine()
+            setTextColor(TEXT)
+            setHintTextColor(HINT_COLOR)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("$score solved")
+            .setMessage("Add your score to this week's leaderboard?")
+            .setView(input)
+            .setNegativeButton("Skip") { _, _ -> showTimedLeaderboard(null) }
+            .setPositiveButton("Submit") { _, _ ->
+                val name = Leaderboard.sanitizeName(input.text.toString())
+                prefs().edit().putString(PREF_NAME, name).apply()
+                val week = weekKey()
+                showLoading(true)
+                Thread {
+                    try {
+                        Leaderboard.submitTimed(name, score, week)
+                        ifAlive { showLoading(false); showTimedLeaderboard(name) }
+                    } catch (e: Exception) {
+                        ifAlive { showLoading(false); toast("Submit failed: ${e.message}"); showTimedLeaderboard(null) }
+                    }
+                }.start()
+            }
+            .showSheet()
+    }
+
+    private fun showTimedLeaderboard(highlight: String?) {
+        val week = weekKey()
+        showLoading(true)
+        Thread {
+            try {
+                val entries = Leaderboard.fetchTimed(week)
+                ifAlive { showLoading(false); showTimedLeaderboardDialog(entries, highlight) }
+            } catch (e: Exception) {
+                ifAlive { showLoading(false); toast("Leaderboard unavailable: ${e.message}") }
+            }
+        }.start()
+    }
+
+    private fun showTimedLeaderboardDialog(entries: List<Leaderboard.Entry>, highlight: String?) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        box.addView(TextView(this).apply {
+            text = "This week · all languages — most words solved in a 5-minute sprint"
+            setTextColor(HINT_COLOR)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, 0, 0, dp(6))
+        })
+        if (entries.isEmpty()) {
+            box.addView(TextView(this).apply {
+                text = "No scores yet this week. Be the first!"
+                setTextColor(TEXT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            })
+        }
+        entries.forEachIndexed { i, e ->
+            val mine = highlight != null && e.name == highlight
+            box.addView(TextView(this).apply {
+                text = "${i + 1}.  ${e.name}   ·   ${e.guesses} words"
+                setTextColor(if (mine) CORRECT else TEXT)
+                setTypeface(if (mine) Typeface.DEFAULT_BOLD else Typeface.DEFAULT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Timed leaderboard")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNeutralButton("☕ Ko-fi") { _, _ -> openInBrowser(KOFI_URL) }
+            .setPositiveButton("Close") { _, _ -> startNewGame() }
+            .showSheet()
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Duel mode — coin toss, alternating turns on one shared board, first to solve wins
+    // ---------------------------------------------------------------------------------
+
+    private fun startDuel() {
+        if (answers.isEmpty()) { toast("Word list not loaded yet"); return }
+        stopTimedDuel()
+        gameMode = Mode.DUEL
+        duelOnline = false
+        dailyMode = false
+        target = answers[Random.nextInt(answers.size)]
+        targetTyped = WordLists.typeableForm(target, currentLang)
+        duelGuesses.clear()
+        currentRow = 0
+        currentCol = 0
+        gameOver = false
+        clearBoard()
+        // Coin toss decides who guesses first.
+        duelPlayerTurn = Random.nextBoolean()
+        updateModeBar()
+        if (duelPlayerTurn) toast("You start 🪙")
+        else { toast("Computer starts 🪙"); npcTurn() }
+    }
+
+    /** The NPC's turn: off the UI thread, pick a valid word consistent with every clue on the
+     *  shared board so far (random among them — smart but not perfect), then play it. */
+    private fun npcTurn() {
+        if (gameMode != Mode.DUEL || gameOver) return
+        val row = currentRow
+        val priors = ArrayList(duelGuesses)
+        val pool = answersTyped.toList()
+        val tgt = targetTyped
+        Thread {
+            val candidates = Wordle.consistentCandidates(pool, priors, tgt)
+            val pick = when {
+                candidates.isNotEmpty() -> candidates[Random.nextInt(candidates.size)]
+                pool.isNotEmpty() -> pool[Random.nextInt(pool.size)]
+                else -> tgt
+            }
+            ifAlive {
+                if (gameMode != Mode.DUEL || gameOver || currentRow != row) return@ifAlive
+                renderGuessRow(row, pick, forceColor = true)
+                labelDuelRow(row, player = false)
+                duelGuesses.add(pick)
+                if (pick == tgt) { gameOver = true; finishDuel("Computer wins"); return@ifAlive }
+                if (row == ROWS - 1) { gameOver = true; finishDuel("Draw — board full"); return@ifAlive }
+                currentRow = row + 1
+                currentCol = 0
+                duelPlayerTurn = true
+                updateModeBar()
+            }
+        }.start()
+    }
+
+    /** Marks board row [r] with who played it, using a leading icon in front of the row. */
+    private fun labelDuelRow(r: Int, player: Boolean) {
+        rowIcons[r].apply {
+            text = when {
+                player -> "👤"
+                duelOnline -> "🧑"
+                else -> "🤖"
+            }
+            contentDescription = when {
+                player -> "you"
+                duelOnline -> "opponent"
+                else -> "computer"
+            }
+            visibility = View.VISIBLE
+        }
+    }
+
+    private fun finishDuel(result: String) {
+        AlertDialog.Builder(this)
+            .setTitle(result)
+            .setMessage("The word was $target.")
+            .setPositiveButton("Rematch") { _, _ -> startDuel() }
+            .setNegativeButton("Done") { _, _ -> startNewGame() }
+            .showSheet()
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Online duel — same turn-by-turn game, the NPC replaced by another human over [Duel]
+    // ---------------------------------------------------------------------------------
+
+    private fun showOnlineDuelMenu() {
+        if (answers.isEmpty()) { toast("Word list not loaded yet"); return }
+        showOptionList("Online duel", listOf(
+            OptionRow("Create game", "Get a code to share with a friend") { createOnlineDuel() },
+            OptionRow("Join game", "Enter a friend's code") { promptJoinOnlineDuel() },
+        ))
+    }
+
+    /** Host: pick a word, reserve a free code, create the room, then wait for a guest to join. */
+    private fun createOnlineDuel() {
+        if (answers.isEmpty()) { toast("Word list not loaded yet"); return }
+        val tgtOrig = answers[Random.nextInt(answers.size)]
+        val tgtTyped = WordLists.typeableForm(tgtOrig, currentLang)
+        val starter = Random.nextInt(2)   // coin toss: 0 = host guesses first, 1 = guest
+        val lang = currentLang.code
+        val len = wordLen
+        showLoading(true)
+        Thread {
+            try {
+                // Retry a few codes so we never clobber someone else's live room.
+                var code = ""
+                for (t in 1..5) {
+                    val c = Duel.newCode()
+                    if (Duel.fetchRoom(c) == null) { code = c; break }
+                }
+                if (code.isEmpty()) throw IOException("Couldn't reserve a code, try again")
+                Duel.createRoom(code, lang, len, tgtTyped, tgtOrig, starter)
+                ifAlive {
+                    showLoading(false)
+                    beginOnlineDuel(code, host = true, starter = starter, round = 0,
+                        tgtOrig = tgtOrig, tgtTyped = tgtTyped, waiting = true)
+                    showWaitingDialog(code)
+                    pollForJoin()
+                }
+            } catch (e: Exception) {
+                ifAlive { showLoading(false); toast("Couldn't create game: ${e.message}") }
+            }
+        }.start()
+    }
+
+    private fun promptJoinOnlineDuel() {
+        val input = EditText(this).apply {
+            hint = "Code"
+            setSingleLine()
+            filters = arrayOf(android.text.InputFilter.LengthFilter(Duel.CODE_LEN),
+                android.text.InputFilter.AllCaps())
+            setTextColor(TEXT)
+            setHintTextColor(HINT_COLOR)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Join duel")
+            .setMessage("Enter the ${Duel.CODE_LEN}-character code your opponent shared.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Join") { _, _ -> joinOnlineDuel(input.text.toString()) }
+            .showSheet()
+    }
+
+    /** Guest: look the room up, make sure its language/length is available (download if needed),
+     *  mark it started, switch to it and begin. */
+    private fun joinOnlineDuel(rawCode: String) {
+        val code = rawCode.uppercase().filter { it.isLetterOrDigit() }.take(Duel.CODE_LEN)
+        if (code.length < Duel.CODE_LEN) { toast("Enter the ${Duel.CODE_LEN}-character code"); return }
+        showLoading(true)
+        Thread {
+            try {
+                val room = Duel.fetchRoom(code)
+                when {
+                    room == null -> ifAlive { showLoading(false); toast("Game not found") }
+                    room.status != "waiting" -> ifAlive { showLoading(false); toast("Game already started") }
+                    else -> {
+                        val words = loadOrFetchWords(room.lang)   // may download; throws on failure
+                        Duel.joinRoom(code)
+                        ifAlive {
+                            showLoading(false)
+                            applyRoomLanguage(room, words)
+                            beginOnlineDuel(code, host = false, starter = room.starter, round = room.round,
+                                tgtOrig = room.targetOrig, tgtTyped = room.target, waiting = false)
+                            toast(if (duelPlayerTurn) "Joined — your turn 🪙" else "Joined — opponent starts 🪙")
+                            if (!duelPlayerTurn) pollForMove()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                ifAlive { showLoading(false); toast("Couldn't join: ${e.message}") }
+            }
+        }.start()
+    }
+
+    /** Shared local setup for both host and guest, for a fresh game or a rematch. */
+    private fun beginOnlineDuel(
+        code: String, host: Boolean, starter: Int, round: Int,
+        tgtOrig: String, tgtTyped: String, waiting: Boolean,
+    ) {
+        stopTimedDuel()   // bumps duelPollGen, clears any prior duel/timed state
+        gameMode = Mode.DUEL
+        dailyMode = false
+        duelOnline = true
+        duelIsHost = host
+        duelMyIndex = if (host) 0 else 1
+        duelRoomCode = code
+        duelStarter = starter
+        duelRound = round
+        duelWaiting = waiting
+        target = tgtOrig
+        targetTyped = tgtTyped
+        duelGuesses.clear()
+        currentRow = 0
+        currentCol = 0
+        gameOver = false
+        clearBoard()
+        duelPlayerTurn = (starter == duelMyIndex)
+        updateModeBar()
+    }
+
+    /** Host poll: wait until the guest flips the room to "playing". */
+    private fun pollForJoin() {
+        val gen = duelPollGen
+        val code = duelRoomCode
+        Thread {
+            try {
+                while (gen == duelPollGen) {
+                    val room = Duel.fetchRoom(code)
+                    if (room == null) { ifAlive { if (gen == duelPollGen) onOpponentGone() }; return@Thread }
+                    if (room.status == "playing") {
+                        ifAlive { if (gen == duelPollGen) onOpponentJoined() }
+                        return@Thread
+                    }
+                    Thread.sleep(1500)
+                }
+            } catch (e: Exception) {
+                ifAlive { if (gen == duelPollGen) toast("Connection lost") }
+            }
+        }.start()
+    }
+
+    private fun onOpponentJoined() {
+        duelWaiting = false
+        waitingDialog?.dismiss(); waitingDialog = null
+        toast("Opponent joined!")
+        updateModeBar()
+        if (!duelPlayerTurn) pollForMove()   // opponent starts
+    }
+
+    /** Poll for the opponent's next move (index == our current row). */
+    private fun pollForMove() {
+        if (gameOver) return
+        val gen = duelPollGen
+        val code = duelRoomCode
+        val expected = currentRow
+        Thread {
+            try {
+                while (gen == duelPollGen) {
+                    val room = Duel.fetchRoom(code)
+                    if (room == null) { ifAlive { if (gen == duelPollGen) onOpponentGone() }; return@Thread }
+                    if (room.moves.size > expected) {
+                        val mv = room.moves[expected]
+                        ifAlive { if (gen == duelPollGen) applyOpponentMove(mv) }
+                        return@Thread
+                    }
+                    Thread.sleep(1500)
+                }
+            } catch (e: Exception) {
+                ifAlive { if (gen == duelPollGen) toast("Connection lost") }
+            }
+        }.start()
+    }
+
+    private fun applyOpponentMove(mv: Duel.Move) {
+        if (gameOver || gameMode != Mode.DUEL || !duelOnline) return
+        val row = currentRow
+        renderGuessRow(row, mv.guess, forceColor = true)
+        labelDuelRow(row, player = false)
+        duelGuesses.add(mv.guess)
+        when {
+            mv.guess == targetTyped -> { gameOver = true; finishOnlineDuel(OnlineResult.LOSE) }
+            row == ROWS - 1 -> { gameOver = true; finishOnlineDuel(OnlineResult.DRAW) }
+            else -> {
+                currentRow = row + 1
+                currentCol = 0
+                duelPlayerTurn = true
+                updateModeBar()
+            }
+        }
+    }
+
+    /** The local player's own submitted guess: push it, then either finish or hand the turn over. */
+    private fun handleMyOnlineMove(guess: String, solved: Boolean, lastRow: Boolean) {
+        val row = currentRow
+        val code = duelRoomCode
+        val idx = duelMyIndex
+        val ended = solved || lastRow
+        val winner = if (solved) idx else -1
+        Thread {
+            try {
+                Duel.pushMove(code, row, idx, guess)
+                if (ended) Duel.finish(code, winner)
+            } catch (e: Exception) {
+                ifAlive { toast("Couldn't send move: ${e.message}") }
+            }
+        }.start()
+        when {
+            solved -> { gameOver = true; finishOnlineDuel(OnlineResult.WIN) }
+            lastRow -> { gameOver = true; finishOnlineDuel(OnlineResult.DRAW) }
+            else -> {
+                currentRow++
+                currentCol = 0
+                duelPlayerTurn = false
+                updateModeBar()
+                pollForMove()
+            }
+        }
+    }
+
+    private enum class OnlineResult { WIN, LOSE, DRAW }
+
+    private fun finishOnlineDuel(result: OnlineResult) {
+        stopOnlineDuel()   // stops polling; leaves duelOnline true so labels/reveal stay correct
+        // The room is kept (not deleted) so either side can offer a rematch on the same code; it's
+        // torn down only when a player actually leaves the finished game (see [leaveOnlineDuel]).
+        val title = when (result) {
+            OnlineResult.WIN -> "You win! 🎉"
+            OnlineResult.LOSE -> "Opponent wins"
+            OnlineResult.DRAW -> "Draw — board full"
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage("The word was $target.")
+            .setPositiveButton("Rematch") { _, _ -> rematchOnlineDuel() }
+            .setNegativeButton("Done") { _, _ -> leaveOnlineDuel(); startNewGame() }
+            .showSheet()
+    }
+
+    /** Rematch on the same room code. The host picks a fresh word, swaps the coin toss and bumps
+     *  the round, then waits for the guest; the guest waits for the host to set the new round up. */
+    private fun rematchOnlineDuel() {
+        val code = duelRoomCode
+        if (code.isEmpty()) { showOnlineDuelMenu(); return }
+        if (duelIsHost) {
+            if (answers.isEmpty()) { toast("Word list not loaded yet"); return }
+            val tgtOrig = answers[Random.nextInt(answers.size)]
+            val tgtTyped = WordLists.typeableForm(tgtOrig, currentLang)
+            val newStarter = 1 - duelStarter        // swap who goes first, for fairness
+            val newRound = duelRound + 1
+            val lang = currentLang.code
+            val len = wordLen
+            showLoading(true)
+            Thread {
+                try {
+                    // A full PUT resets the room (clears the previous round's moves) and re-opens it.
+                    Duel.createRoom(code, lang, len, tgtTyped, tgtOrig, newStarter, newRound)
+                    ifAlive {
+                        showLoading(false)
+                        beginOnlineDuel(code, host = true, starter = newStarter, round = newRound,
+                            tgtOrig = tgtOrig, tgtTyped = tgtTyped, waiting = true)
+                        showWaitingDialog(code, rematch = true)
+                        pollForJoin()
+                    }
+                } catch (e: Exception) {
+                    ifAlive { showLoading(false); toast("Couldn't start rematch: ${e.message}") }
+                }
+            }.start()
+        } else {
+            // Guest: wait for the host to open the next round, then auto-join it.
+            duelWaiting = true
+            showRematchWaitDialog()
+            pollForRematch()
+        }
+    }
+
+    /** Guest poll: wait until the host opens the next round (a higher `round`, back to "waiting"). */
+    private fun pollForRematch() {
+        val gen = duelPollGen
+        val code = duelRoomCode
+        val fromRound = duelRound
+        Thread {
+            try {
+                while (gen == duelPollGen) {
+                    val room = Duel.fetchRoom(code)
+                    if (room == null) { ifAlive { if (gen == duelPollGen) onOpponentGone() }; return@Thread }
+                    if (room.round > fromRound && room.status == "waiting") {
+                        ifAlive { if (gen == duelPollGen) onRematchOffered(room) }
+                        return@Thread
+                    }
+                    Thread.sleep(1500)
+                }
+            } catch (e: Exception) {
+                ifAlive { if (gen == duelPollGen) toast("Connection lost") }
+            }
+        }.start()
+    }
+
+    /** Guest: the host opened a new round — adopt its word/starter and join it. */
+    private fun onRematchOffered(room: Duel.Room) {
+        waitingDialog?.dismiss(); waitingDialog = null
+        showLoading(true)
+        val code = duelRoomCode
+        Thread {
+            try {
+                Duel.joinRoom(code)
+                ifAlive {
+                    showLoading(false)
+                    beginOnlineDuel(code, host = false, starter = room.starter, round = room.round,
+                        tgtOrig = room.targetOrig, tgtTyped = room.target, waiting = false)
+                    toast(if (duelPlayerTurn) "Rematch — your turn 🪙" else "Rematch — opponent starts 🪙")
+                    if (!duelPlayerTurn) pollForMove()
+                }
+            } catch (e: Exception) {
+                ifAlive { showLoading(false); toast("Couldn't start rematch: ${e.message}") }
+            }
+        }.start()
+    }
+
+    /** Leaves a finished/idle online duel and tears the room down (host only, after a short grace
+     *  so a still-polling opponent can read the final move first). */
+    private fun leaveOnlineDuel() {
+        val code = duelRoomCode
+        val host = duelIsHost
+        stopOnlineDuel()
+        duelOnline = false
+        if (host && code.isNotEmpty()) Thread {
+            try { Thread.sleep(3000); Duel.deleteRoom(code) } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun showRematchWaitDialog() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(24), dp(20), dp(24), dp(8))
+        }
+        box.addView(TextView(this).apply {
+            text = "Waiting for your opponent to start a rematch…"
+            setTextColor(TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            gravity = Gravity.CENTER
+        })
+        waitingDialog = AlertDialog.Builder(this)
+            .setView(box)
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ -> cancelOnlineDuel() }
+            .create()
+        waitingDialog?.show()
+        waitingDialog?.let { styleAsBottomSheet(it) }
+    }
+
+    /** Opponent's room vanished mid-game (they quit, or a stale room was cleaned up). */
+    private fun onOpponentGone() {
+        if (gameOver) return
+        gameOver = true
+        stopOnlineDuel()
+        AlertDialog.Builder(this)
+            .setTitle("Opponent left")
+            .setMessage("The game ended. The word was $target.")
+            .setPositiveButton("New online duel") { _, _ -> showOnlineDuelMenu() }
+            .setNegativeButton("Done") { _, _ -> startNewGame() }
+            .showSheet()
+    }
+
+    private fun showWaitingDialog(code: String, rematch: Boolean = false) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(24), dp(16), dp(24), dp(8))
+        }
+        box.addView(TextView(this).apply {
+            text = if (rematch) "Rematch! Same code — waiting for your opponent:"
+                else "Share this code with your opponent:"
+            setTextColor(HINT_COLOR)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        })
+        box.addView(TextView(this).apply {
+            text = code
+            setTextColor(TEXT)
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 40f)
+            letterSpacing = 0.25f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(4))
+            isClickable = true
+            contentDescription = "Duel code $code, tap to share"
+            setOnClickListener { shareDuelCode(code) }
+        })
+        box.addView(TextView(this).apply {
+            text = "Tap the code to share  ·  waiting for them to join…"
+            setTextColor(HINT_COLOR)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            gravity = Gravity.CENTER
+        })
+        waitingDialog = AlertDialog.Builder(this)
+            .setView(box)
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ -> cancelOnlineDuel() }
+            .create()
+        waitingDialog?.show()
+        waitingDialog?.let { styleAsBottomSheet(it) }
+    }
+
+    private fun shareDuelCode(code: String) {
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, "Let's duel in Word Guesser! Join my game with code: $code")
+        }
+        try { startActivity(Intent.createChooser(send, "Share code")) }
+        catch (e: Exception) { toast("No app to share with") }
+    }
+
+    private fun cancelOnlineDuel() {
+        val code = duelRoomCode
+        val host = duelIsHost
+        stopOnlineDuel()
+        duelOnline = false
+        if (host && code.isNotEmpty()) Thread { Duel.deleteRoom(code) }.start()
+        startNewGame()
+    }
+
+    /** Returns the word list for [langCode] from cache/built-in, downloading it if needed. Runs on
+     *  a background thread (callers are already off the UI thread); throws on failure. */
+    @Throws(IOException::class)
+    private fun loadOrFetchWords(langCode: String): List<String> {
+        val lang = WordLists.LANGUAGES.firstOrNull { it.code == langCode }
+            ?: throw IOException("Unknown language '$langCode'")
+        if (lang.url == null) return WordBank.ANSWERS.map { it.uppercase() }
+        val cache = cacheFile(lang)
+        if (cache.exists()) {
+            val cached = cache.readLines().filter { it.isNotBlank() }
+            if (cached.isNotEmpty()) return cached
+        }
+        val words = WordLists.fetchAndFilter(lang)
+        if (words.size < 20) throw IOException("only ${words.size} words found")
+        cache.writeText(words.joinToString("\n"))
+        return words
+    }
+
+    /** Switches the UI to the room's language + length without starting a normal game (that's
+     *  [beginOnlineDuel]'s job). Mirrors [applyLanguage] but skips the fresh-game side effect. */
+    private fun applyRoomLanguage(room: Duel.Room, words: List<String>) {
+        val lang = WordLists.LANGUAGES.firstOrNull { it.code == room.lang } ?: currentLang
+        currentLang = lang
+        langButton.text = lang.badge
+        prefs().edit().putString(PREF_LANG, lang.code).apply()
+        pushRecentLang(lang.code)
+        populateKeys()
+        populateLengthRow()
+        answersAll = words
+        prefs().edit().putInt(PREF_LEN, room.len).apply()
+        rebuildForLength(room.len)   // sets wordLen + answer/accept indexes + rebuilds the board
+        updateLengthButtons()
+    }
+
+    private fun weekKey(): String {
+        val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"), Locale.US).apply {
+            firstDayOfWeek = java.util.Calendar.MONDAY
+            minimalDaysInFirstWeek = 4 // ISO-8601 week numbering
+        }
+        val week = cal.get(java.util.Calendar.WEEK_OF_YEAR)
+        val year = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) cal.weekYear
+            else cal.get(java.util.Calendar.YEAR)
+        return "%04dW%02d".format(year, week)
+    }
+
     /** Resets tiles, hint/count lines and key colours (without picking a new target). */
     private fun clearBoard() {
         revealRow.visibility = View.GONE
-        supportRow.visibility = View.GONE
         for (r in 0 until ROWS) {
             hintButtons[r].visibility = View.INVISIBLE
             countViews[r].visibility = View.GONE
             countViews[r].text = ""
+            rowIcons[r].visibility = View.INVISIBLE
+            rowIcons[r].text = ""
             for (c in 0 until wordLen) {
                 tiles[r][c].text = ""
                 tiles[r][c].contentDescription = null
                 tiles[r][c].importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 tiles[r][c].background = tileDrawable(Color.TRANSPARENT, TILE_BORDER_EMPTY)
+                tileState[r][c] = -1
             }
         }
         keyState.clear()
         for ((_, btn) in keyButtons) btn.background = keyDrawable(KEY_DEFAULT)
     }
 
+    /** In duel mode the human may only type on their own turn (and, online, once the opponent
+     *  has actually joined). */
+    private fun inputBlocked(): Boolean = gameMode == Mode.DUEL && (duelWaiting || !duelPlayerTurn)
+
     private fun onLetter(ch: Char) {
-        if (gameOver || currentCol >= wordLen) return
+        if (gameOver || inputBlocked() || currentCol >= wordLen) return
         val tile = tiles[currentRow][currentCol]
         tile.text = ch.toString()
         tile.background = tileDrawable(Color.TRANSPARENT, TILE_BORDER_FILLED)
@@ -713,7 +1905,7 @@ class MainActivity : Activity() {
     }
 
     private fun onDelete() {
-        if (gameOver || currentCol == 0) return
+        if (gameOver || inputBlocked() || currentCol == 0) return
         currentCol--
         val tile = tiles[currentRow][currentCol]
         tile.text = ""
@@ -736,18 +1928,18 @@ class MainActivity : Activity() {
         val states = evaluate(guess, targetTyped)
         val inPlace = states.count { it == ST_CORRECT }
         val inWord = states.count { it == ST_CORRECT || it == ST_PRESENT }
-        if (hardMode) {
+        // Duel always uses colours (both players need the feedback, and the count line is reused
+        // to label whose row it is), so hard mode is ignored there.
+        val useHard = hardMode && gameMode != Mode.DUEL
+        if (useHard) {
             // No colours. Show only aggregate feedback under the row.
             countViews[currentRow].text = "$inWord in word · $inPlace in right place"
             countViews[currentRow].visibility = View.VISIBLE
             for (c in 0 until wordLen) describeTile(currentRow, c, guess[c], null)
         } else {
             for (c in 0 until wordLen) {
-                val color = when (states[c]) {
-                    ST_CORRECT -> CORRECT
-                    ST_PRESENT -> PRESENT
-                    else -> ABSENT
-                }
+                val color = stateColor(states[c])
+                tileState[currentRow][c] = states[c]
                 tiles[currentRow][c].background = tileDrawable(color, color)
                 updateKeyColor(guess[c], states[c])
                 describeTile(currentRow, c, guess[c], states[c])
@@ -767,25 +1959,49 @@ class MainActivity : Activity() {
         }
         if (dailyMode) dailyGuesses.add(guess)
 
-        when {
-            guess == targetTyped -> {
-                gameOver = true
-                if (dailyMode) finishDaily(won = true)
-                else {
-                    recordResult(won = true, guessRow = currentRow)
-                    toast(winMessage(currentRow))
-                    showSupportPrompt()
+        val solved = guess == targetTyped
+        val lastRow = currentRow == ROWS - 1
+        when (gameMode) {
+            Mode.DUEL -> {
+                labelDuelRow(currentRow, player = true)
+                duelGuesses.add(guess)
+                if (duelOnline) handleMyOnlineMove(guess, solved, lastRow)
+                else when {
+                    solved -> { gameOver = true; finishDuel("You win! 🎉") }
+                    lastRow -> { gameOver = true; finishDuel("Draw — board full") }
+                    else -> {
+                        currentRow++
+                        currentCol = 0
+                        duelPlayerTurn = false
+                        updateModeBar()
+                        npcTurn()
+                    }
                 }
             }
-            currentRow == ROWS - 1 -> {
-                gameOver = true
-                if (dailyMode) finishDaily(won = false)
-                else { recordResult(won = false, guessRow = currentRow); showReveal(target) }
+            Mode.TIMED -> when {
+                solved -> { gameOver = true; advanceTimed(solved = guess) }
+                lastRow -> { gameOver = true; advanceTimed(solved = null) }
+                else -> { currentRow++; currentCol = 0 }
             }
-            else -> {
-                currentRow++
-                currentCol = 0
-                if (dailyMode) saveDailyProgress()
+            Mode.NORMAL -> when {
+                solved -> {
+                    gameOver = true
+                    if (dailyMode) finishDaily(won = true)
+                    else {
+                        recordResult(won = true, guessRow = currentRow)
+                        maybeShowWinSupport(winMessage(currentRow), target)
+                    }
+                }
+                lastRow -> {
+                    gameOver = true
+                    if (dailyMode) finishDaily(won = false)
+                    else { recordResult(won = false, guessRow = currentRow); showReveal(target) }
+                }
+                else -> {
+                    currentRow++
+                    currentCol = 0
+                    if (dailyMode) saveDailyProgress()
+                }
             }
         }
     }
@@ -793,16 +2009,32 @@ class MainActivity : Activity() {
     /** Per-position state (delegates to the pure, unit-tested [Wordle.evaluate]). */
     private fun evaluate(guess: String, target: String): IntArray = Wordle.evaluate(guess, target)
 
+    /** Active tile/key fill for each state — swaps to the high-contrast (colour-blind) palette
+     *  when that setting is on. */
+    private fun correctColor() = if (highContrast) CORRECT_HC else CORRECT
+    private fun presentColor() = if (highContrast) PRESENT_HC else PRESENT
+    private fun stateColor(state: Int) = when (state) {
+        ST_CORRECT -> correctColor()
+        ST_PRESENT -> presentColor()
+        else -> ABSENT
+    }
+
+    /** Repaints every already-revealed tile and key from its stored state — used when the
+     *  high-contrast setting is toggled mid-game so the change is visible immediately. */
+    private fun recolorBoard() {
+        if (!::tiles.isInitialized) return
+        for (r in 0 until ROWS) for (c in 0 until wordLen) {
+            val s = tileState[r][c]
+            if (s >= 0) { val col = stateColor(s); tiles[r][c].background = tileDrawable(col, col) }
+        }
+        for ((ch, st) in keyState) keyButtons[ch]?.background = keyDrawable(stateColor(st))
+    }
+
     private fun updateKeyColor(ch: Char, state: Int) {
         val prev = keyState[ch] ?: -1
         if (state <= prev) return // never downgrade a key's color
         keyState[ch] = state
-        val color = when (state) {
-            ST_CORRECT -> CORRECT
-            ST_PRESENT -> PRESENT
-            else -> ABSENT
-        }
-        keyButtons[ch]?.background = keyDrawable(color)
+        keyButtons[ch]?.background = keyDrawable(stateColor(state))
     }
 
     private fun winMessage(row: Int): String = when (row) {
@@ -928,7 +2160,7 @@ class MainActivity : Activity() {
             .setView(ScrollView(this).apply { addView(tv) })
             .setPositiveButton("Close", null)
             .setNeutralButton("More…") { _, _ -> lookUpMenu(word) }
-            .show()
+            .showSheet()
     }
 
     /**
@@ -945,19 +2177,14 @@ class MainActivity : Activity() {
         val wiktionaryUrl = "https://en.wiktionary.org/wiki/${Uri.encode(w)}"
 
         val own = isOwnLanguage() // device language == word language → definition only
-        val labels = ArrayList<String>()
-        val actions = ArrayList<() -> Unit>()
-        labels.add(if (own) "Define (Gemini)" else "Define & translate (Gemini)")
-        actions.add { geminiLookup(word) }
-        if (!own) { labels.add("Translate (web)"); actions.add { openInBrowser(translateUrl) } }
-        labels.add("Define (Wiktionary)"); actions.add { openInBrowser(wiktionaryUrl) }
+        val rows = ArrayList<OptionRow>()
+        rows.add(OptionRow(if (own) "Define (Gemini)" else "Define & translate (Gemini)") { geminiLookup(word) })
+        if (!own) rows.add(OptionRow("Translate (web)") { openInBrowser(translateUrl) })
+        rows.add(OptionRow("Define (Wiktionary)") { openInBrowser(wiktionaryUrl) })
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            labels.add("Other apps…"); actions.add { processTextChooser(word) }
+            rows.add(OptionRow("Other apps…") { processTextChooser(word) })
         }
-        AlertDialog.Builder(this)
-            .setTitle(word)
-            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
-            .show()
+        showOptionList(word, rows)
     }
 
     private fun geminiLookup(word: String) {
@@ -1027,7 +2254,7 @@ class MainActivity : Activity() {
             .setTitle(title)
             .setView(ScrollView(this).apply { addView(tv) })
             .setPositiveButton("Close", null)
-            .show()
+            .showSheet()
     }
 
     /**
@@ -1176,11 +2403,32 @@ class MainActivity : Activity() {
             setPadding(dp(4), 0, 0, 0)
         })
 
+        // --- High-contrast (colour-blind) palette ---
+        val contrastCb = android.widget.CheckBox(this).apply {
+            text = "High-contrast colours"
+            setTextColor(TEXT)
+            isChecked = highContrast
+        }
+        box.addView(contrastCb)
+        box.addView(TextView(this).apply {
+            text = "Uses orange and blue instead of green and yellow, easier to tell apart."
+            setTextColor(HINT_COLOR)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(dp(4), 0, 0, 0)
+        })
+
+        box.addView(TextView(this).apply {
+            text = "How to play ›"
+            setTextColor(0xFF8AB4F8.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, dp(18), 0, 0)
+            setOnClickListener { showHowToPlay() }
+        })
         box.addView(TextView(this).apply {
             text = "Statistics ›"
             setTextColor(0xFF8AB4F8.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setPadding(0, dp(18), 0, 0)
+            setPadding(0, dp(14), 0, 0)
             setOnClickListener { showStats() }
         })
         box.addView(TextView(this).apply {
@@ -1211,15 +2459,20 @@ class MainActivity : Activity() {
                     hardMode = hardCb.isChecked
                     prefs().edit().putBoolean(PREF_HARD, hardMode).apply()
                 }
+                if (contrastCb.isChecked != highContrast) {
+                    highContrast = contrastCb.isChecked
+                    prefs().edit().putBoolean(PREF_HIGHCONTRAST, highContrast).apply()
+                    recolorBoard() // apply to the current board without disturbing play
+                }
                 when {
                     chosen != wordLen -> {
                         prefs().edit().putInt(PREF_LEN, chosen).apply()
                         applyLength() // rebuilds the board + starts a fresh game
                     }
-                    hardChanged -> startNewGame() // apply the difficulty change cleanly
+                    hardChanged -> { populateBoard(); startNewGame() } // resize tiles for the count lines, then start fresh
                 }
             }
-            .show()
+            .showSheet()
     }
 
     private fun stepButton(label: String): Button = Button(this).apply {
@@ -1295,7 +2548,7 @@ class MainActivity : Activity() {
             .setTitle("Sources & licenses")
             .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Close", null)
-            .show()
+            .showSheet()
     }
 
     // ---------------------------------------------------------------------------------
@@ -1306,16 +2559,31 @@ class MainActivity : Activity() {
     private fun statsBucket(): String =
         "stats_${currentLang.code}|$wordLen|${if (strictMode) "S" else "-"}|${if (hardMode) "H" else "-"}"
 
-    /** Stored as ROWS win-counts (by guess number) + a trailing loss count, comma-separated. */
+    // Extra stats slots stored after the ROWS win-counts and the loss count.
+    private val LOSS_IDX = ROWS          // trailing loss count
+    private val CUR_STREAK_IDX = ROWS + 1
+    private val BEST_STREAK_IDX = ROWS + 2
+
+    /**
+     * Stored comma-separated: ROWS win-counts (by guess number), a loss count,
+     * then the current win streak and the best win streak.
+     */
     private fun recordResult(won: Boolean, guessRow: Int) {
         val key = statsBucket()
         val nums = parseStats(prefs().getString(key, null))
-        if (won) nums[guessRow]++ else nums[ROWS]++
+        if (won) {
+            nums[guessRow]++
+            nums[CUR_STREAK_IDX]++
+            if (nums[CUR_STREAK_IDX] > nums[BEST_STREAK_IDX]) nums[BEST_STREAK_IDX] = nums[CUR_STREAK_IDX]
+        } else {
+            nums[LOSS_IDX]++
+            nums[CUR_STREAK_IDX] = 0
+        }
         prefs().edit().putString(key, nums.joinToString(",")).apply()
     }
 
     private fun parseStats(raw: String?): IntArray {
-        val nums = IntArray(ROWS + 1)
+        val nums = IntArray(ROWS + 3)
         if (raw != null) {
             val parts = raw.split(",")
             for (i in nums.indices) nums[i] = parts.getOrNull(i)?.toIntOrNull() ?: 0
@@ -1339,8 +2607,10 @@ class MainActivity : Activity() {
         for (key in buckets) {
             val nums = parseStats(prefs().getString(key, null))
             val wins = (0 until ROWS).sumOf { nums[it] }
-            val losses = nums[ROWS]
+            val losses = nums[LOSS_IDX]
             val played = wins + losses
+            val curStreak = nums[CUR_STREAK_IDX]
+            val bestStreak = nums[BEST_STREAK_IDX]
             if (played == 0) continue
             val parts = key.removePrefix("stats_").split("|")
             val label = WordLists.LANGUAGES.firstOrNull { it.code == parts.getOrNull(0) }?.label
@@ -1360,24 +2630,65 @@ class MainActivity : Activity() {
                 setPadding(0, dp(14), 0, 0)
             })
             box.addView(TextView(this).apply {
-                text = "$tags\n$played played · $wins won ($pct%) · $losses lost"
+                text = "$tags\n$played played · $wins won ($pct%) · $losses lost" +
+                    "\nStreak: $curStreak · Best: $bestStreak"
                 setTextColor(HINT_COLOR)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             })
-            val dist = (0 until ROWS).joinToString("   ") { "${it + 1}:${nums[it]}" }
             box.addView(TextView(this).apply {
-                text = "Guesses  $dist"
-                setTextColor(TEXT)
+                text = "Guess distribution"
+                setTextColor(HINT_COLOR)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setPadding(0, dp(2), 0, 0)
+                setPadding(0, dp(6), 0, dp(2))
             })
+            val maxCount = (0 until ROWS).maxOf { nums[it] }.coerceAtLeast(1)
+            for (i in 0 until ROWS) {
+                val count = nums[i]
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(2), 0, dp(2))
+                }
+                row.addView(TextView(this).apply {
+                    text = (i + 1).toString()
+                    setTextColor(HINT_COLOR)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    layoutParams = LinearLayout.LayoutParams(dp(16), WRAP_CONTENT)
+                })
+                // A full-width track; the filled part's width is proportional to this row's count.
+                val track = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                }
+                track.addView(View(this).apply {
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(3).toFloat()
+                        setColor(if (count > 0) correctColor() else DIVIDER)
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, dp(16), count.toFloat().coerceAtLeast(0.001f))
+                })
+                if (maxCount - count > 0) track.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, dp(16), (maxCount - count).toFloat())
+                })
+                row.addView(track)
+                row.addView(TextView(this).apply {
+                    text = count.toString()
+                    setTextColor(TEXT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    gravity = Gravity.END
+                    setPadding(dp(8), 0, 0, 0)
+                    layoutParams = LinearLayout.LayoutParams(dp(28), WRAP_CONTENT)
+                })
+                box.addView(row)
+            }
         }
         AlertDialog.Builder(this)
             .setTitle("Statistics")
             .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Close", null)
             .setNeutralButton("Reset…") { _, _ -> confirmResetStats() }
-            .show()
+            .showSheet()
     }
 
     private fun confirmResetStats() {
@@ -1391,7 +2702,7 @@ class MainActivity : Activity() {
                 editor.apply()
                 toast("Statistics reset")
             }
-            .show()
+            .showSheet()
     }
 
     // ---------------------------------------------------------------------------------
@@ -1446,9 +2757,9 @@ class MainActivity : Activity() {
     /** Paints an already-submitted guess [g] into board row [r] exactly as [onEnter] would (colours
      *  or hard-mode counts, plus the original spelling + look-up "?"). Used to restore an
      *  in-progress daily and to redraw a finished one. */
-    private fun renderGuessRow(r: Int, g: String) {
+    private fun renderGuessRow(r: Int, g: String, forceColor: Boolean = false) {
         val states = evaluate(g, targetTyped)
-        if (hardMode) {
+        if (hardMode && !forceColor) {
             val inPlace = states.count { it == ST_CORRECT }
             val inWord = states.count { it == ST_CORRECT || it == ST_PRESENT }
             countViews[r].text = "$inWord in word · $inPlace in right place"
@@ -1456,11 +2767,8 @@ class MainActivity : Activity() {
             for (c in g.indices) { tiles[r][c].text = g[c].toString(); describeTile(r, c, g[c], null) }
         } else {
             for (c in g.indices) {
-                val color = when (states[c]) {
-                    ST_CORRECT -> CORRECT
-                    ST_PRESENT -> PRESENT
-                    else -> ABSENT
-                }
+                val color = stateColor(states[c])
+                tileState[r][c] = states[c]
                 tiles[r][c].text = g[c].toString()
                 tiles[r][c].background = tileDrawable(color, color)
                 updateKeyColor(g[c], states[c])
@@ -1476,6 +2784,8 @@ class MainActivity : Activity() {
     }
 
     private fun startDaily(date: String, len: Int, pool: List<String>) {
+        stopTimedDuel()
+        gameMode = Mode.NORMAL // the daily is a normal-rules game (leaves timed/duel)
         dailyMode = true
         dailyLen = len
         dailyDateKey = date
@@ -1523,7 +2833,7 @@ class MainActivity : Activity() {
             .setMessage("Not solved — the word was $dailyTargetWord.\nTime: ${fmtTime(seconds)}")
             .setPositiveButton("Leaderboard") { _, _ -> showLeaderboard(dailyLangCode, dailyDateKey, dailyLen, null) }
             .setNegativeButton("Close") { _, _ -> applyLength() }
-            .show()
+            .showSheet()
     }
 
     private fun promptSubmit(seconds: Int, guessCount: Int) {
@@ -1555,7 +2865,7 @@ class MainActivity : Activity() {
                     }
                 }.start()
             }
-            .show()
+            .showSheet()
     }
 
     /** Rebuilds the finished board (read-only) for a daily already played today. */
@@ -1568,6 +2878,8 @@ class MainActivity : Activity() {
             ?: pool[dailyIndex(len, pool.size, currentLang.code)]
         val guesses = parts.getOrNull(4)?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
 
+        stopTimedDuel()
+        gameMode = Mode.NORMAL
         dailyMode = true
         dailyLen = len
         dailyDateKey = date
@@ -1593,7 +2905,7 @@ class MainActivity : Activity() {
             )
             .setPositiveButton("Leaderboard") { _, _ -> showLeaderboard(dailyLangCode, date, len, prefs().getString(PREF_NAME, null)) }
             .setNegativeButton("Close") { _, _ -> applyLength() }
-            .show()
+            .showSheet()
     }
 
     private fun showLeaderboard(langCode: String, date: String, len: Int, highlight: String?) {
@@ -1641,18 +2953,42 @@ class MainActivity : Activity() {
             .setView(ScrollView(this).apply { addView(box) })
             .setNeutralButton("☕ Ko-fi") { _, _ -> openInBrowser(KOFI_URL) }
             .setPositiveButton("Close") { _, _ -> if (dailyMode) applyLength() }
-            .show()
+            .showSheet()
     }
 
     private fun showLanguagePicker() {
-        val labels = WordLists.LANGUAGES.map { lang ->
+        // Most-recently-used languages float to the top; the rest keep the catalog order.
+        val recent = prefs().getString(PREF_RECENT_LANGS, "").orEmpty()
+            .split(",").filter { it.isNotBlank() }
+        val ordered = WordLists.LANGUAGES.sortedBy { lang ->
+            val idx = recent.indexOf(lang.code)
+            if (idx >= 0) idx else recent.size + WordLists.LANGUAGES.indexOf(lang)
+        }
+        // Compact single-line rows: the download status is a trailing glyph ("↓") instead of a
+        // second text line, so twice as many languages fit before scrolling. A "›" means it's
+        // already available and tapping just selects it.
+        var anyToDownload = false
+        val rows = ordered.map { lang ->
             val installed = lang.url == null || cacheFile(lang).exists()
-            if (installed) lang.label else lang.label + "  ⬇"
-        }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Choose language")
-            .setItems(labels) { _, which -> selectLanguage(WordLists.LANGUAGES[which]) }
-            .show()
+            if (!installed) anyToDownload = true
+            OptionRow(
+                title = lang.label,
+                trailing = if (installed) "›" else "↓",
+                trailingColor = if (installed) null else LINK_COLOR,
+            ) { selectLanguage(lang) }
+        }
+        showOptionList(
+            "Choose language", rows,
+            caption = if (anyToDownload) "↓  tap to download" else null,
+        )
+    }
+
+    /** Remembers [code] as most-recently used, so the picker can surface it first (keeps 5). */
+    private fun pushRecentLang(code: String) {
+        val cur = prefs().getString(PREF_RECENT_LANGS, "").orEmpty()
+            .split(",").filter { it.isNotBlank() && it != code }
+        val updated = (listOf(code) + cur).take(5)
+        prefs().edit().putString(PREF_RECENT_LANGS, updated.joinToString(",")).apply()
     }
 
     private fun selectLanguage(lang: WordLists.Language) {
@@ -1690,6 +3026,7 @@ class MainActivity : Activity() {
         currentLang = lang
         langButton.text = lang.badge
         prefs().edit().putString(PREF_LANG, lang.code).apply()
+        pushRecentLang(lang.code)
         populateKeys()
         populateLengthRow() // the selectable range can differ per language
         setWordSource(words) // → applyLength() rebuilds the board and starts the game
@@ -1817,7 +3154,7 @@ class MainActivity : Activity() {
         loadingDialog = AlertDialog.Builder(this)
             .setView(box)
             .setCancelable(false)
-            .show()
+            .show() // stays a small centred dialog — a full-width sheet for a spinner looks odd
     }
 
     // ---------------------------------------------------------------------------------

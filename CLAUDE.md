@@ -14,6 +14,13 @@ built in code so the release APK stays ~72 KB. Package: `com.hrbons.wordguesser`
 - `install.bat` = debug build + `adb install -r`. `install-release.bat` = signed release (uninstalls first).
 - Tests: `gradlew.bat testDebugUnitTest` (JUnit, JVM-only; not in APK).
 - Physical test device: Motorola edge 30 neo, `adb` serial `ZY22GD8FG4` (1080×2400).
+- **Regenerate `docs/screenshots/`:** `.\update-screenshots.ps1` (build + install + all 35 shots).
+  Driven by a debug-only harness: `am start … --es shot <name>` → `MainActivity.applyShot(name)`
+  (behind `BuildConfig.DEBUG`, so R8 strips it from release) drops the app straight into each
+  state; leaderboard/definition dialogs use stub data so shots stay offline & deterministic. The
+  debug build has `applicationIdSuffix ".debug"` so it installs alongside the release (no signature
+  clash, keeps its stats). New UI state → add one `when` arm in `applyShot` + one row in the
+  script's `$shots` map. `-Only <names>` re-shoots a subset; `-SkipBuild` reuses the install.
 
 ## Layout of the code
 
@@ -41,6 +48,29 @@ loss reveal; Ko-fi nudge (once/day, no toggle); download retry + lifecycle-safe 
 
 Keyboard: DEL bottom-left (before Z), ENTER bottom-right (user-chosen order — don't reorder).
 Transient messages use a custom pill ABOVE the keyboard (not Toast).
+
+**Duel modes:** turn-by-turn on one shared board, first to solve wins, board full = draw.
+- *vs computer* (`startDuel`): NPC picks a clue-consistent word (`Wordle.consistentCandidates`).
+- *vs player (online)* (`Duel.kt`): the NPC replaced by a human over **Firebase Realtime Database,
+  REST only** (no client SDK — kept dependency-free/F-Droid-safe, like `Leaderboard`). Host creates
+  a room (short code, unambiguous alphabet) → shares code → guest joins. `rooms/<CODE>` holds
+  lang/len/target/starter/status/moves; both apps know `target` and score their own guess locally
+  (`Wordle.evaluate`), so only the guessed *word* + who-played crosses the wire. Short-poll every
+  ~1.5s **only** while it's the opponent's turn / waiting for a join. Move index == board row. Host
+  deletes the room ~4s after game-over (Spark plan has no auto-cleanup). Cheating (guest reading
+  `target`) is the same accepted trade-off as the shipped dreamlo write key.
+  **Gated on `local.properties` `firebase.dbUrl`** → `BuildConfig.FIREBASE_DB_URL`; empty hides the
+  whole "Duel vs player" menu, so nothing ships without a backend. See `Duel.kt` header + memory.
+  Firebase project is live (`wordguesser-42b54`, europe-west1, open rules on `rooms/`). **Verified
+  end-to-end on device** (app-as-guest vs curl-as-host): create+share code, cancel→host-cleanup,
+  join→language/length adopt+board resize, opponent-move polling+render (🧑/👤 icons, correct
+  colours), own winning move push + `finish(winner)` sync, win dialog. Note: RTDB returns
+  contiguous 0-based `moves` keys as a JSON **array**, so `Duel.parseRoom` handles array *and*
+  object. **Rematch** reuses the same room code: host does a full PUT (new word, `round`++, coin
+  toss swapped `1 - starter`, moves cleared), guest polls (`round` up + status "waiting") and
+  auto-joins — verified end-to-end on device (2-round cycle). Room is kept after game-over for
+  rematch and torn down only on "Done"/Cancel (host, 3s grace). No screenshot-harness arm for the
+  waiting/opponent-turn states yet; move-send is fire-and-forget with 3× retry.
 
 ## Distribution (LIVE)
 
