@@ -1,79 +1,82 @@
 # Word Guesser — production to-do
 
-Outstanding items before publishing (e.g. Google Play). Personal sideloading already works.
+_Laatst herzien: 2026-07-19._ Personal sideloading werkt al; de app is publiek uitgebracht
+(F-Droid + GitHub Pages). Play Store is bewust uitgesteld (zie memory `play-account-strategy`).
 
-## 🔴 Blockers (required to distribute)
+## 🔴 NU: v2 uitbrengen (afgerond werk bereikt nog geen gebruikers)
 
-- [x] **Release signing** — `release.keystore` (alias `wordguesser`, RSA-2048) + a
-  `signingConfig` reading `RELEASE_*` from `local.properties` (keystore + creds gitignored).
-  `assembleRelease` now outputs a signed `app-release.apk`; `install-release.bat` builds +
-  sideloads it. ⚠️ Keep `release.keystore` + passwords backed up — losing them means no more
-  updates under the same identity.
-- [x] **Test the release build on a device** — the signed, R8-minified release runs fine on
-  device (nothing stripped).
-- [ ] **Play Store listing requirements** (if publishing there):
-  - [ ] Data Safety form (the app makes network calls to third-party sources on language download).
-  - [ ] Privacy policy URL (even if "no data collected").
-  - [ ] Current `targetSdk` per Play's latest requirement.
-  - [ ] Store assets: icon, feature graphic, screenshots, description.
+De gepubliceerde APK draait nog op **`versionCode 1` / `versionName "1.0"`** en haalt de
+**oude** data op. Al het onderstaande is klaar + op device getest, maar zit alleen in source /
+lokale builds — geen enkele gebruiker heeft het. Dit is de belangrijkste openstaande taak.
 
-## 📦 Distribution (prepared 2026-07-15 — needs your push)
+Nog niet uitgebracht:
+- Zelf-gehoste NL-woordenlijsten (`nl.txt` answer-pool + `nl-accept.txt` recognition).
+- Offline definities (`nl-defs.json`, 100% coverage) + form-of-resolutie.
+- Two-tier accept/answer-lijst.
+- **Online duel vs speler** (Firebase RTDB) + rematch.
+- Duel vs computer + timed-modus UI.
+- Layout-tweak (board-hoogte, `keyHeightPx`/`tileSizeFor`).
 
-- [x] **Self-hosted F-Droid repo** built by hand (`dist/fdroid/repo/` — signed
-  `index-v1.jar`) + public landing page (`dist/index.html`). Fingerprint
-  `C74E…456EE`. Rebuild with `dist/fdroid/rebuild-index.sh`.
-- [x] **Published (2026-07-15).** Public dist repo `abons/wordguesser` on GitHub Pages →
-  https://abons.github.io/wordguesser/ (direct APK download + working F-Droid repo).
-  Private source repo `abons/wordguesser-src` (no secrets pushed). Live URLs verified 200.
-- [ ] **Official F-Droid catalogue** (optional, later) — metadata ready in
-  `dist/fdroid-official/`; needs public source + a FOSS LICENSE first. See its NOTES.md.
+Release-checklist:
+- [x] **Layout-tweak op device geverifieerd** (2026-07-20) — length 5, 8 én DE+ß (worst case),
+  geen overflow; ß-toets volledig zichtbaar.
+- [x] `versionCode` 1 → 2 + `versionName` "2.0" in `app/build.gradle`.
+- [x] Cache-suffixen al correct (`words_nl_v8`/`accept_nl_v1`/`defs_nl_v4`) — geen bump nodig.
+- [x] Signed release-APK gebouwd (v2.0, versionCode 2 geverifieerd, ~98 KB).
+- [x] Release-APK op device getest — start, rendert, gameplay ok, "Duel vs player" aanwezig
+  (firebase-gate werkt in R8-release).
+- [x] APK in `dist/fdroid/repo/` (`_2.apk`) → `rebuild-index.sh` (suggestedVersion nu dynamisch) → gepusht.
+- [x] Landing page `dist/index.html` bijgewerkt naar v2 (versie/URL/SHA-256/grootte).
+- [ ] Optioneel: GitHub release-tag `v2.0` op de source-repo (self-hosted F-Droid heeft geen
+  changelog-files, dus enkel een tag/notes indien gewenst).
 
-## 🟠 Recommended (quality / robustness)
+## 🟠 Kwaliteit / afronden
 
-- [~] **Word-list hosting** — **NL done**: self-hosted a pre-filtered mirror of OpenTaal at
-  `https://abons.github.io/wordguesser/wordlists/nl.txt` (built by `dist/wordlists/build-nl.sh`,
-  attribution/modifications in `dist/wordlists/NL-README.md`). The other lists (dwyl,
-  lorenbrichter, enz, wooorm) are still fetched from third-party GitHub raw URLs — mirror those
-  too if desired (re-check GPL/LGPL/CC-BY per language). Cache bumped `_v5`→`_v6`.
+- [ ] **Screenshots opnieuw** — 13 result/badge-shots zijn na de UX-redesign verwijderd
+  (memory `screenshots-pending`); win-gated, met de hand vastleggen per
+  `docs/screenshots/README.md`. Geen harness-arm voor de duel waiting/opponent-turn-states.
+- [ ] Screenshot-harness-arm toevoegen voor duel-states (waiting / opponent-turn) zodat die
+  ook offline/deterministisch te schieten zijn.
+- [ ] **Word-list hosting** — NL is zelf-gehost; de overige lijsten (dwyl, lorenbrichter, enz,
+  wooorm) komen nog van third-party GitHub raw-URLs. Mirror die desgewenst (her-check
+  GPL/LGPL/CC-BY per taal).
 
-## 🟢 Optional / nice-to-have
+## 🟢 Optioneel / nice-to-have
 
-- [ ] Bundle the full GPL/LGPL/CC-BY license texts in-app (currently linked, not bundled —
-  chosen to keep the APK tiny; linking is acceptable since the data isn't redistributed).
-- [ ] Custom app icon / branding (current icon is a placeholder mini-board).
-- [ ] Landscape / tablet layout (currently portrait-locked).
-- [ ] Win/lose screen, share result. (Statistics ✅ done — see below.)
-- [ ] More languages (Tier 3 needs a non-Latin keyboard: Cyrillic, Greek, etc.).
+- [ ] Volledige GPL/LGPL/CC-BY-licentieteksten in-app bundelen (nu gelinkt, niet gebundeld).
+- [ ] Custom app-icon / branding (huidige icon is een placeholder mini-board).
+- [ ] Landscape / tablet-layout (nu portrait-locked).
+- [ ] Win/lose-scherm, resultaat delen. (Statistieken ✅ al gedaan.)
+- [ ] Meer talen (Tier 3 vereist een niet-Latijns keyboard: Cyrillisch, Grieks, enz.).
+
+## 🟡 Later: Google Play (uitgesteld)
+
+Bewust uitgesteld tot er ~5 apps zijn (memory `play-account-strategy`). Wanneer opgepakt:
+- [ ] Data Safety-formulier (de app doet netwerk-calls naar third-party bronnen bij download).
+- [ ] Privacy policy-URL (ook bij "geen data verzameld").
+- [ ] `targetSdk` naar Play's actuele minimumeis.
+- [ ] Store-assets: icon, feature graphic, screenshots, beschrijving.
+- [ ] Eenmalige Play developer-fee betalen.
 
 ## ✅ Done
 
-- [x] Native, dependency-free Kotlin app; builds + runs (debug) on device.
-- [x] `applicationId` + `namespace` = `com.hrbons.wordguesser` (no `com.example`).
-- [x] Language switching with on-demand download + offline cache.
-- [x] Strict mode (downloaded languages only); word-length setting (per-language range).
-- [x] Accent folding + accented display on match; German ß / Nordic Æ Ø / PL Ł / HR Đ keys.
-- [x] Word lookup ("?" → Translate / Wiktionary / other apps).
-- [x] Accessibility: TalkBack labels on tiles (letter + colour state), keys, "?" and header
-  buttons, plus a spoken per-guess summary.
-- [x] Ko-fi "support the developer" link in settings.
-- [x] Statistics (⚙ → Statistics): wins with guess-count distribution + losses, tracked per
-  language and settings bucket (length / strict / hard); with a reset option.
-- [x] Daily puzzle — a **separate** shared English puzzle for **each word length (4–8)**; the
-  📅 button opens a length picker showing today's status per length ("play" / "solved in N" /
-  "not solved"). Play-once with replay of the finished board, and a public dreamlo leaderboard
-  (per day + length: name + fewest guesses + fastest time). Exiting a daily (New / Close)
-  restores the normal game at the language's preferred length.
-- [x] "?" lookup via the on-device Gemini app (no API key) with a device-language reply;
-  API-key fallback; definition-only when the word is in the device language.
-- [x] Reveal the missed word (with "?") under the board after a loss.
-- [x] Download robustness: retry with backoff on network reads (word lists + leaderboard),
-  and lifecycle-safe UI callbacks (`ifAlive`) so late results can't crash a closed screen.
-- [x] Unit tests (19, JVM/JUnit): `Wordle.evaluate` duplicate handling, `WordLists`
-  fold/ß/clean filtering, `Leaderboard` name sanitising + rank parse/sort. Run with
-  `gradlew.bat testDebugUnitTest`. (Core logic extracted into pure, testable classes.)
-- [x] Licensing: all sources permitted; in-app **Sources & licenses** with attribution,
-  license links and a modifications note; README attribution section. No list bundled in APK.
-- [x] Release build compiles with R8 + resource shrinking (unsigned); `lintVital` passes.
-- [x] **minSdk 21** (Android 5.0, ~99% of devices) with an all-XML launcher-icon fallback
-  (adaptive on API 26+, vector on 21–25) and an `ACTION_PROCESS_TEXT` guard for API < 23.
-  targetSdk stays 34.
+- [x] Native, dependency-vrije Kotlin-app; bouwt + draait op device.
+- [x] Release signing (`release.keystore`) + `signingConfig` uit `local.properties`; release-build
+  op device getest (R8 + resource shrinking, `lintVital` groen).
+- [x] **Publiek uitgebracht (2026-07-15, = v1)**: self-hosted F-Droid repo (`dist/fdroid/repo/`,
+  fingerprint `C74E…456EE`) + landing page op GitHub Pages
+  (https://abons.github.io/wordguesser/). Private + public source-repo, geen secrets gepusht.
+- [x] `applicationId` + `namespace` = `com.hrbons.wordguesser`.
+- [x] Taalwissel met on-demand download + offline cache; strict mode; word-length 4–8.
+- [x] Accent-folding + accented display; DE ß / Nordic Æ Ø / PL Ł / HR Đ keys.
+- [x] Word lookup ("?"); TalkBack-accessibility; Ko-fi-link.
+- [x] Statistieken (per taal + settings-bucket, met reset).
+- [x] Daily puzzle per word-length (4–8) + dreamlo-leaderboard per dag/length.
+- [x] Loss-reveal; download-robuustheid (retry + lifecycle-safe callbacks).
+- [x] Unit-tests (JUnit, JVM-only); licensing/attributie in-app ("Sources & licenses").
+- [x] minSdk 21 (adaptief/vector icon-fallback), targetSdk 34.
+
+### Klaar maar nog NIET uitgebracht (zie "NU: v2 uitbrengen")
+- [x] Zelf-gehoste NL answer-pool + accept-lijst + 100%-coverage offline definities.
+- [x] Online duel vs speler (Firebase RTDB, REST-only) + rematch; duel vs computer; timed-modus.
+- [x] Height-aware layout-tweak (gebouwd; device-verificatie staat nog open).
