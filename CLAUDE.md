@@ -131,12 +131,15 @@ Built by scripts in `dist/wordlists/`, hosted at `…/wordlists/`. Two-tier:
 ## Current state / open items
 
 - Distribution is live; app builds clean, tests pass.
-- **Not yet released as a new version:** the self-hosted NL lists, offline definitions, and the
-  two-tier accept list are in source + local builds only. The shipped APK is still `v1`
-  (versionCode 1) fetching the old data. To ship: bump `versionCode`/`versionName`, build signed
-  APK, drop into `dist/fdroid/repo/`, run `rebuild-index.sh`, push.
-- **In progress (uncommitted):** a layout tweak in `MainActivity.kt` to use screen height better
-  — board container is weighted+centred, taller keyboard keys via `keyHeightPx()`, height-aware
-  `tileSizeFor()`, larger tile/key margins. Built successfully; **not yet visually verified on
-  device** (verify a fresh game at length 5 and 8, and NL with an extra-key language, don't overflow).
+- **v2.0 released (2026-07-20, versionCode 2).** The self-hosted NL lists, offline definitions,
+  two-tier accept list, online/computer duels, timed mode and the height-aware layout tweak are
+  all shipped: signed APK in `dist/fdroid/repo/com.hrbons.wordguesser_2.apk`, F-Droid index
+  rebuilt (`suggestedVersion` now dynamic = highest versionCode), landing page updated, both
+  repos pushed, GitHub release tag `v2.0` on the source repo (APK attached). Live-verified:
+  APK 200, landing page shows v2.0 + matching SHA, F-Droid offers v2.
+- **Layout tweak (committed & device-verified):** board container weighted+centred, taller keys
+  via `keyHeightPx()`, height-aware `tileSizeFor()`, larger margins. Verified on device at
+  length 5, 8 and DE+ß (worst case) — no overflow, ß key fully visible.
+- Next release: bump `versionCode`/`versionName`, bump cache suffixes if list content/filtering
+  changed, build signed APK, drop into `dist/fdroid/repo/`, run `rebuild-index.sh`, push both repos.
 - See `todo.md` for the production checklist.
